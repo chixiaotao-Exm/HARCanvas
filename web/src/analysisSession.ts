@@ -12,7 +12,7 @@ export function retainAnalysis(previous: Analysis | null, incoming: Analysis): A
   const suggestions = new Map((previous?.suggestions ?? []).map(suggestion => [suggestion.requestId, suggestion]));
   for (const suggestion of incoming.suggestions) suggestions.set(suggestion.requestId, suggestion);
   return {
-    summary: [previous?.summary, incoming.summary].filter(Boolean).join('\n\n'),
+    summary: [...new Set([...(previous?.summary ?? '').split('\n\n'), ...incoming.summary.split('\n\n')].filter(Boolean))].slice(-50).join('\n\n'),
     suggestions: [...suggestions.values()],
     warnings: [...new Set([...(previous?.warnings ?? []), ...incoming.warnings])],
   };

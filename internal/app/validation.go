@@ -42,7 +42,7 @@ func validateFlow(flow Flow) (*graph, error) {
 	return g, nil
 }
 
-func inspectFlow(flow Flow) (*graph, FlowValidation) {
+func inspectExecutableFlow(flow Flow) (*graph, FlowValidation) {
 	v := FlowValidation{Issues: []FlowIssue{}, EntryNodeIDs: []string{}, ReachableNodeIDs: []string{}}
 	add := func(code, node, field, message, action string) {
 		v.Issues = append(v.Issues, FlowIssue{code, node, field, message, action})
@@ -187,6 +187,10 @@ func inspectFlow(flow Flow) (*graph, FlowValidation) {
 		switch node.Data.Kind {
 		case "input", "manual", "extract":
 			producers[node.Data.Variable] = append(producers[node.Data.Variable], node.ID)
+		case "browser", "browserVerification":
+			if node.Data.Variable != "" {
+				producers[node.Data.Variable] = append(producers[node.Data.Variable], node.ID)
+			}
 		}
 	}
 	ancestors := func(nodeID, sourceID string) bool {
@@ -346,6 +350,38 @@ func inspectFlow(flow Flow) (*graph, FlowValidation) {
 			checkTemplate(node.ID, "expected", d.Expected)
 		case "output":
 			checkTemplate(node.ID, "template", d.Template)
+		case "loop", "subflow":
+			if d.Loop != nil && d.Loop.Mode == "each" {
+				if !strings.HasPrefix(strings.TrimSpace(d.Loop.Items), "[") {
+					reference := strings.TrimSpace(d.Loop.Items)
+					reference = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(reference, "{{"), "}}"))
+					checkRef(node.ID, "loop.items", reference)
+				}
+			}
+		case "browser", "browserVerification":
+			if d.URL != "" {
+				checkTemplate(node.ID, "url", d.URL)
+			}
+			if d.Kind == "browser" {
+				if (d.BrowserAction == "click" || d.BrowserAction == "fill" || d.BrowserAction == "wait") && strings.TrimSpace(d.Selector) == "" {
+					add("browser_selector", node.ID, "selector", "请先选择需要操作的页面元素。", "填写元素选择器，或让 Agent 选择对应元素。")
+				}
+				if d.Variable != "" && !variableName.MatchString(d.Variable) {
+					add("invalid_variable", node.ID, "variable", "保存读取结果的参数名称无效。", "使用字母或下划线开头的名称。")
+				}
+				switch d.BrowserAction {
+				case "", "navigate", "click", "fill", "read", "wait":
+				default:
+					add("browser_action", node.ID, "browserAction", "请选择支持的浏览器操作。", "选择打开页面、点击、填写、读取或等待。")
+				}
+				checkTemplate(node.ID, "text", d.Text)
+			}
+			if d.Kind == "browserVerification" {
+				if !variableName.MatchString(d.Variable) {
+					add("invalid_variable", node.ID, "variable", "请为人工验证结果填写参数名。", "填写一个参数名，例如 verificationDone。")
+				}
+			}
+		case "break":
 		default:
 			add("unsupported_kind", node.ID, "kind", "这个方块暂不支持执行。", "使用输入、请求、提取、条件、断言、人工输入或输出方块。")
 		}

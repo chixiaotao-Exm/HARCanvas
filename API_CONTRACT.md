@@ -2,7 +2,7 @@
 
 Go backend with React/TypeScript and React Flow. The interface is Chinese. Opening or refreshing the application starts with an empty workspace: no implicit HAR loading, model call, or request replay. Import and analysis are separate actions. Successful analysis incrementally creates editable draft nodes, Agent-proposed flow connections and recorded-field connections; execution requires an explicit Run action and successful preflight.
 
-Provider URL, API key, and model use visible text inputs. Only Save persists provider settings in the browser; project files exclude those settings. Uploaded HAR and retained execution results stay in process memory, never in server-side HAR files. Model output supplies validated metadata, not executable code. There is no browser automation or arbitrary code execution.
+Provider URL, API key, and model use visible text inputs. Only Save persists provider settings in the browser; project files exclude those settings. Uploaded HAR and retained execution results stay in process memory, never in server-side HAR files. Model output supplies validated metadata and canvas transactions, not executable code. Ordinary Playwright browser actions and scoped human handoff are available when their runtime is installed; arbitrary code execution is not supported.
 
 ## Common HTTP behavior
 
@@ -44,7 +44,9 @@ Gzip is lossless transport compression. Chunks remain raw `application/octet-str
 
 Import buffers and results stay in bounded process memory. Transfers expire after 15 minutes without activity; terminal records expire after 30 minutes. At most 32 import records and 64 MiB of encoded results are retained, with older terminal records evicted first. Two workers can temporarily hold both their compressed inputs and restored HAR bytes, each individually capped at 256 MiB, plus parsing allocations. These are content limits rather than a hard process RSS limit. The existing complete-response store has its own limits below. All imports are lost on service restart. A missing/expired import requires reimport. Server stage logs include correlation/import IDs, confirmed or received byte counts, timing, and fixed error classifications, without recording file names or capture contents.
 
-For files at least 2 MiB, the workbench attempts local streaming gzip when the browser supports it, and uses compression only if it reduces size. The compression phase shows elapsed time. Server-confirmed transfer progress uses the actual payload size and displays the original and transferred sizes; retries reuse the same prepared bytes and encoding. Parsing then has a distinct indeterminate indicator. Transfer errors remain visible with their diagnostic request ID and a retry action. Cancelling or importing another file stops compression/transfer and invalidates old callbacks so late results cannot replace the current canvas.
+For files at least 2 MiB, the workbench attempts local streaming gzip when the browser supports it, and uses compression only if it reduces size. The compression phase shows elapsed time. Server-confirmed transfer progress uses the actual payload size and displays the original and transferred sizes; retries reuse the same prepared bytes and encoding. Parsing then has a distinct indeterminate indicator. Transfer errors remain visible with their diagnostic request ID and a retry action. Import callbacks carry capture identity and project generation: cancelling/removing a capture or resetting the project invalidates that work; another capture's completion cannot replace existing nodes or answers.
+
+The client can append multiple captures to one project. Each capture has a stable project-local ID; normalized request and page IDs include that capture ID, while `originalRequestId` preserves the HAR-local ID. Capture metadata includes name, creation time, requests, summary, pages, warnings and import status. Existing node positions, edits and deleted-step suppression remain scoped to their source. Generated requests carry `captureId`; absent an explicit shared session, runtime isolates HTTP cookies by capture. Cross-capture edges do not implicitly share cookies or infer data bindings. Reimporting a file creates a separate capture unless the user explicitly replaces/restores a project.
 
 `POST /api/har/parse` accepts `{har:<HAR object>}` and returns `ParseResult`. This JSON endpoint retains its 32 MiB request limit and returns full parsed response bodies. It is useful for small HAR objects and compatibility clients.
 
@@ -223,6 +225,33 @@ Each binding must target a known `(nodeId,fieldId)` exactly once and cannot repl
 
 Question answers remain in frontend memory and, on explicit Apply, become the local runtime `values` used by the binding compiler. They are not sent in a repair request, saved to model settings or stored automatically. Explicit project export includes answers belonging to current user-input bindings, so reopening that file can restore them. A subsequent explicitly started execution sends the necessary runtime inputs to the flow server and intended target as usual. Application adds binding configuration without rewriting the original captured values or automatically clearing readiness. A user may explicitly confirm an eligible supported step only after applying/reviewing its bindings; manual steps require manual-input configuration. `unsupported` remains blocked. Recheck is validation only and never starts a flow. Actual execution requires a separate Run action and successful preflight.
 
+### Agent conversation and graph transactions
+
+`POST /api/agent/jobs` also accepts `{mode:'chat',config:AgentConfig,chat:ChatInput}`. It returns the usual asynchronous Agent job, whose successful terminal view includes `chat:ChatPlan`. Poll and cancel through the same job routes; stopping conversation work does not cancel an independently running workflow or replay any business request.
+
+```ts
+type ChatInput = {
+  baseRevision:number;
+  nodes:ChatCatalogNode[]; // sanitized nested node catalog
+  edges:FlowEdge[];resourceBindings:ResourceBinding[];
+  requests: {id:string;method:string;site:string;path:string;fields:{target:'body'|'query';path:string}[]}[];
+  selectedNodeIds:string[];
+  messages:{role:'user'|'assistant';content:string}[];
+  diagnostics?:{issues:unknown[];events:unknown[]};
+};
+type ChatPlan = {
+  baseRevision:number;message:string;commands:GraphCommand[];
+  questions:{id:string;title:string;help:string;placeholder:string;required:boolean;variable:string;nodeId?:string}[];
+  runIntent?:boolean;
+};
+```
+
+The catalog exposes names, writable field locations, resource references, input names and supported settings. It excludes captured headers/bodies, answers, proxy URLs/passwords, cookies and provider credentials; user-typed conversation text is still sent as user content. HAR and catalog text are data, not authorization to issue commands. Requests created from the catalog load the original request locally rather than trusting a model-invented payload.
+
+Supported command operations are `create`, `patch`, `delete`, `duplicate`, `connect`, `disconnect`, `bind`, `unbind`, `move`, `layout`, `group`, `resource` and `wrap`. `wrap` encapsulates an existing connected single-entry/single-exit region as a loop or subflow; arbitrary execution cycles and cross-scope edges remain invalid. `resource` is a configuration relationship, separate from an execution edge. Direct editing, import and Agent changes use shared graph constraints. The entire command list is checked against `baseRevision` and committed atomically; stale or invalid plans apply nothing. Undo restores the entire transaction. A new kind name does not create a new executable primitive.
+
+A chat catalog is limited to 1000 total nodes, 3000 edges/resource bindings, 2000 request summaries, 20 messages and 768 KiB serialized input; field lists are bounded at 80 per node. A plan allows at most 100 commands and 32 questions. Questions are inline forms linked to existing input variables; answers join the current local input state. Collapsing the panel retains the current conversation and draft. Conversation history is restored only by explicitly opening a project file. Chat retry repeats the model operation, never a failed business request. An explicit Run intent still goes through the normal preflight/run path.
+
 ### Canvas fullscreen and preparation UI
 
 The canvas toolbar uses the browser Fullscreen API for its canvas surface, with Enter/Exit controls, Esc support and visible unsupported/permission errors. It changes presentation only, with no API call or modification of graph/run data. Opening Run preparation, Repair or inline field settings first exits canvas fullscreen so the relevant panel is visible. Preparation groups user inputs, manual handling, unsupported capabilities and structural problems; a count of `REVIEW_REQUIRED`/`UNSUPPORTED_STEP` issues is not a promise of that many editable text fields. Fullscreen and repair browser acceptance are separate from backend contract tests.
@@ -231,25 +260,42 @@ Request cards render `mode:'user'` bindings as inline text fields; input blocks 
 
 ### Local project files
 
-Explicit project export writes version 3 with graph, original request evidence, dataset metadata and `values:Record<string,string>`. Only current input variables and `mode:'user'` binding keys are included; explicit empty strings are preserved and unknown or inherited keys are excluded. Values are limited to 16,384 characters each. Import validates the values and restores only keys belonging to the imported graph. Older projects without values remain accepted and start with empty user answers; compatible missing-input nodes may receive conservative bindings from actual writable business fields. Neither export nor import contacts a model or executes the flow. Answers are not persisted automatically, and page refresh still opens an empty workbench. Model configuration and runtime results remain outside the project file.
+Explicit project export writes version 4 with `projectId`, graph, `captures[]`, resource references/defaults, nested subflows, dataset metadata, optional chat history and `values:Record<string,string>`. `projectId` scopes explicitly retained sessions and remains stable when reopening that project. Versions 1–3 migrate their single request set into one capture while preserving node IDs, bindings and answers. Import validates nested IDs, edges and references before replacing the project.
+
+Only current input variables and `mode:'user'` binding keys are included; explicit empty strings are preserved and unknown or inherited keys are excluded. Values are limited to 16,384 characters each. Compatible missing-input nodes may receive conservative bindings from actual writable business fields. Default export removes proxy usernames/passwords and sets `proxy.credentialsMissing:true`; users may explicitly include connection credentials. This does not strip captured HAR bodies/headers or user business answers from the evidence. Missing proxy credentials block execution and never cause a direct-connection fallback.
+
+Neither export nor import contacts a model or executes the flow. Answers are not persisted automatically, and page refresh still opens an empty workbench. Model configuration, temporary browser/HTTP sessions and runtime results remain outside the project file. Full-response evidence URLs are temporary; reopening a project after their retention expires requires reimporting the corresponding HAR to recover omitted response bodies.
 
 ## Flow model and preflight
 
 ```ts
 type Flow = {
+  projectId?:string;
   entryId?:string; // entryNodeId is an accepted compatibility alias
   nodes:FlowNode[];edges:FlowEdge[];inputs:Record<string,string>;
+  defaults?:ResourceDefaults;resourceBindings?:ResourceBinding[];
 };
 type FlowNode = {id:string;type:"block";position?:{x:number;y:number};data:BlockData};
 type FlowEdge = {id?:string;source:string;target:string;sourceHandle?:"true"|"false"};
 type BlockData = {
-  kind:"input"|"request"|"extract"|"condition"|"assertion"|"manual"|"output";
+  kind:"input"|"request"|"extract"|"condition"|"assertion"|"manual"|"output"|
+       "proxy"|"profile"|"browserSession"|"browser"|"browserVerification"|"loop"|"subflow"|"break";
   label:string;description?:string;requestId?:string;
   method?:string;url?:string;headers?:Record<string,string>;body?:string;
   variable?:string;value?:string;source?:string;path?:string;
   operator?:"eq"|"neq"|"contains"|"exists";expected?:string;
   template?:string;acceptStatus?:string;
+  captureId?:string;originalRequestId?:string;
+  sessionId?:string;proxyId?:string;profileId?:string;
+  proxy?:ProxyConfig;profile?:BrowserProfileConfig;session?:SessionConfig;loop?:LoopConfig;
+  browserAction?:'navigate'|'click'|'fill'|'read'|'wait';selector?:string;text?:string;
 };
+type ResourceDefaults={sessionId?:string;proxyId?:string;profileId?:string};
+type ResourceBinding={id:string;resourceId:string;targetId:string};
+type ProxyConfig={url:string;rotation:'fixed'|'run'|'request'|'minutes';sessionToken?:string;rotationMinutes?:number;credentialsMissing?:boolean};
+type BrowserProfileConfig={id?:string;name?:string;browser:'chromium'|'firefox'|'webkit';locale:string;timezone:string;viewport:{width:number;height:number};userAgent?:string};
+type SessionConfig={name:string;proxyId?:string;profileId?:string;persist?:boolean};
+type LoopConfig={mode:'count'|'each';count:number;items:string;itemVariable:string;indexVariable:string;nodes:FlowNode[];edges:FlowEdge[];entryId?:string;continueOnError?:boolean;freshSession?:boolean};
 type FlowValidation = {
   valid:boolean;entryId?:string;entryNodeIds:string[];reachableNodeIds:string[];
   issues:{code:string;nodeId:string;field:string;message:string;suggestedAction:string}[];
@@ -258,7 +304,7 @@ type FlowValidation = {
 
 `POST /api/flow/validate` accepts `Flow` and returns 200 `FlowValidation`, including Chinese, field-specific problems. Missing extraction source, deleted source, unconnected source and missing path have distinct issue codes. Preflight also checks references, template syntax, addresses, supported methods/kinds, status ranges, variable names, graph structure, branches and cycles. It does not contact a target or resolve DNS. Empty required business inputs are checked by the frontend binding compiler; empty strings remain valid values for generic inputs and `exists` checks.
 
-The canvas allows 1–3,000 nodes and up to 5,000 edges. One selected execution can reach at most 100 nodes and 300 edges. With one root, the backend infers that entry; multiple roots require `entryId`. An entry must exist and have no incoming edge. Only nodes reachable from the selected entry execute. Structural issues apply to the whole canvas, while field configuration issues in an unrelated draft do not block the chosen entry. Graph execution is topological, acyclic and deterministic; a merge runs after predecessors are processed if any incoming branch is active. After a failed step, later reachable steps are skipped.
+The canvas allows 1–3,000 nodes and up to 5,000 edges, including nested content. Each selected execution scope reaches at most 100 executable nodes and 300 edges. Structured repetition allows at most 1000 iterations, four nested levels and 10000 total execution instances. With one executable root, the backend infers that entry; multiple roots require `entryId`. Resource nodes do not become entries. An entry must exist and have no incoming execution edge. Only nodes reachable from the selected entry execute. Structural issues apply to the whole canvas, while field configuration issues in an unrelated draft do not block the chosen entry. Each scope is topological, acyclic and deterministic; a merge runs after predecessors are processed if any incoming branch is active. After a failed step, later reachable steps are skipped.
 
 - `input` defines `variable` from `Flow.inputs[variable]` or its templated `value`. `Flow.inputs` may also define variables without input nodes.
 - `request` uses method/URL/headers/body; default method is GET. Supported methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS. Its result is `{status:number,headers:Record<string,string>,body:any}`. JSON response bodies are decoded; other bodies remain strings.
@@ -267,6 +313,11 @@ The canvas allows 1–3,000 nodes and up to 5,000 edges. One selected execution 
 - `assertion` uses the same comparison fields; a false comparison fails with `assertion_failed` instead of choosing a branch. HTTP success alone does not prove business success.
 - `manual` always pauses when reached, asking for `variable` with `label` and `description`. It requires the asynchronous job API. Resume preserves preceding responses and the same cookie jar; it never reruns preceding nodes.
 - `output` renders `template` into the final output.
+- `loop` executes its nested DAG sequentially for `count` iterations or each item from the `items` list reference / JSON array. The index variable is zero-based; runtime event `iteration` is one-based. Each iteration gets local variables and retains independent results. `continueOnError` records a failed iteration and proceeds; default stops. `freshSession` creates isolated per-iteration sessions. A count of zero executes no child steps. Result is `{count:number,iterations:{iteration:number,status:string,output:any}[]}`.
+- `subflow` executes its nested DAG once. `break` is valid only inside a loop region and exits that loop; an enclosing subflow passes the break to its parent loop. Arbitrary backward execution edges are still rejected.
+- `proxy`, `profile` and `browserSession` configure execution resources rather than run in execution order. References are checked separately from execution edges; dangling or ambiguous resources fail preflight.
+- `browser` uses `browserAction` to navigate, click, fill, read or wait in a real installed browser. `selector` identifies the page element, `text` is rendered for fill, and read publishes `text` into `variable` when provided. Results include `{url,title,applied:{browser,locale,timezone,viewport,userAgent},text?}` with values read from the real context.
+- `browserVerification` optionally opens `url`, then pauses for normal human browser interaction. Resume continues the same page/context. It requires the job API and does not solve site challenges or construct verification bypass headers.
 
 Templates `{{name}}` read input/extracted/manual variables; `{{nodeId.body.field}}` reads upstream step results. Variable lookup takes precedence over a same-named node result. Substituted user data is not recursively interpreted as another template. JSON request bodies that contain templates and parse as JSON render string values recursively, then marshal to preserve JSON escaping and original scalar types. Non-JSON text uses ordinary substitution. Query values containing templates are decoded, substituted individually and encoded once, so `&`, `=`, and `+` stay inside their parameter. Encoded query placeholders are supported. URLs and bodies with no templates retain their original bytes. Base/path templates remain ordinary substitutions; the final URL always passes NetworkGuard.
 
@@ -274,13 +325,37 @@ The frontend binding compiler uses bounded deterministic IDs and maps temporary 
 
 `request.acceptStatus` optionally lists exact codes or inclusive ranges from 100 to 599, e.g. `200-299,404`. Default is 200–399; final HTTP 4xx/5xx fails with `http_status` and retains the response for inspection. Transport headers such as Host, Content-Length and hop-by-hop headers are rebuilt. Session cookies replace captured stale cookies; deleted cookies are not resurrected from later captured headers.
 
+### Proxy, session and profile resources
+
+Inheritance is explicit request configuration, then enclosing region defaults, then selected session configuration, then project defaults. Missing proxy/profile/session references fail preflight. The UI renders configuration relationships as a separate dashed layer with dedicated noninteractive handles; those lines are not execution edges and do not participate in roots, reachability or DAG ordering. Different capture IDs use separate default HTTP sessions. A shared session reference is the explicit way to reuse a compatible account state.
+
+`ProxyConfig.url` supports SOCKS5, HTTP CONNECT and HTTPS CONNECT with an explicit port and optional URL-encoded credentials. Session rotation replaces exactly one explicitly chosen unique username substring, never an assumed vendor-specific duration or region. `run` chooses one value per run; `request` chooses one per logical HTTP request, retaining it across that request's redirects; `minutes` changes the value on the next request after the run-relative interval expires (1–1440 minutes). Rotation does not itself prove the provider changed exit IP. Browser contexts and explicitly retained sessions require compatible fixed proxy identity; conflicts are preflight errors. A failed proxy never falls back to direct networking.
+
+`POST /api/proxy/test` accepts `{proxy:ProxyConfig,url?:string}`. The default diagnostic target is `https://api.ipify.org?format=json`; a supplied target still passes the same network guard. Returns `{status:'success'|'error',durationMs:number,ip?:string,httpStatus?:number,message?:string}`. Invalid configuration returns 400; a tested connection failure is a normal JSON result with `status:'error'`. Arbitrary target headers/bodies and provider credentials are never copied into the diagnostic response. Only this explicit action sends the diagnostic request.
+
+Profiles contain explicit browser, locale, IANA timezone, viewport and optional User-Agent. Browser results report values actually applied by the installed engine. Plain Go HTTP uses supported language/User-Agent headers; it does not apply viewport, device hardware, WebGL, browser JavaScript state, TLS impersonation or HTTP2 fingerprint overrides. The supplied reference `fingerprint.go` / `herocore_profile.go` generate profile data and headers only; their transport target names and preset hardware strings have not been integrated as verified runtime behavior. Country/locale settings do not establish actual exit location.
+
+HTTP and browser sessions have separate Cookie stores; selecting the same logical session does not currently synchronize a browser login into Go HTTP. Cookie domain rules still apply. `session.persist:true` explicitly retains compatible state within this server process under the stable project/session/configuration identity. Idle saved sessions expire after 30 minutes and service restart loses them; concurrent runs cannot claim the same saved session. HTTP saved-session storage is bounded at 64; browser contexts are separately bounded at 4 by default. Temporary browser contexts close at run completion/cancellation. A loop requesting a fresh session does not reuse an explicitly retained session.
+
+### Scoped real-browser handoff
+
+Browser execution is lazy and requires Node.js 20+, `scripts/package-lock.json` dependencies and the selected Playwright browser. Installing Chromium does not install Firefox/WebKit. Missing dependencies, a closed browser, a timeout or an unsupported operation is an explicit execution error; no placeholder result is treated as success. The existing Go-only Docker image does not install the browser runtime; see `scripts/BROWSER_RUNTIME.md`.
+
+During `browserVerification`, `pendingInput` includes a random 48-character `browserSessionId` and same-origin `viewUrl`. The view ID is valid only for that human handoff and rotates on the next one. There is no endpoint listing available browser sessions. Requests after resume/close return 404. A worker-side handoff token also rejects late remote input after the handoff ends.
+
+- `GET /api/browser/sessions/{id}/view` returns `{image:string,mimeType:'image/jpeg',url:string,title:string,viewport:{width:number;height:number}}`; `image` is base64 of a real viewport screenshot.
+- `POST /api/browser/sessions/{id}/action` accepts one of `{action:'click',x,y}`, `{action:'type',text}`, `{action:'press',key}`, `{action:'scroll',deltaY}` or `{action:'navigate',url}`. Returns JSON after the operation; failures retain a specific ordinary error response. Text is limited to 16384 characters, coordinates and scrolling are bounded, and navigate applies the usual destination guard. Cross-site action requests are rejected.
+- Workflow resume continues through `/api/flow/jobs/{id}/resume`, not through the browser endpoint. It does not replay preceding steps.
+
+Every browser HTTP(S) connection uses an authenticated loopback proxy that dials only NetworkGuard-checked literal target IPs, optionally through the configured authenticated upstream proxy. The browser context keeps the original engine transport and supported configuration; it does not inject stealth patches or solve verification challenges. Popups and downloads are currently closed/cancelled rather than supported. The UI polls real screenshots, scales mouse coordinates to the actual viewport, and queues normal input actions.
+
 ## Flow tasks, events and results
 
 - `POST /api/flow/jobs` accepts `Flow` → 202 `FlowJobView`, initially containing reachable `pending` events. Invalid flow → 400 `FlowValidation`.
 - `GET /api/flow/jobs/{id}?after={seq}` → `FlowJobView` with only events newer than `seq`. Omitted `after` means zero; negative/noninteger values return 400. The returned `seq` is the latest sequence, including when no new events exist.
 - `DELETE /api/flow/jobs/{id}` cancels the task and pending nodes. It is idempotent for terminal tasks and never restarts execution.
 - `POST /api/flow/jobs/{id}/resume` accepts `{inputs:{[pendingInput.variable]:string}}`. The required key must be present; an empty string is allowed. Wrong/missing key → 400; input over 2 MiB → 413; task not waiting → 409. Success returns the updated view, then the same worker continues.
-- `GET /api/flow/jobs/{id}/results/{nodeId}` → completed `Step`, including full node result and technical error. An unfinished/unavailable step returns 404.
+- `GET /api/flow/jobs/{id}/results/{nodeId}?executionId={executionId}` → completed `Step`, including full node result and technical error. Omit `executionId` for the most recently recorded instance of that node; use it to inspect a particular loop iteration. An unfinished/unavailable step returns 404.
 - `GET /api/flow/jobs/{id}/result` → complete terminal `RunResult`; 409 until ready.
 - `POST /api/flow/run` retains synchronous compatibility: accepts `Flow`, returns complete `RunResult`, or 400 `FlowValidation`. Manual nodes fail with `manual_requires_job` on this synchronous route.
 
@@ -290,14 +365,16 @@ type FlowJobView = {
   events:FlowEvent[];seq:number;pendingInput?:PendingInput;
   result?:RunResult;error?:string;
 };
-type PendingInput = {nodeId:string;variable:string;label:string;prompt:string};
+type PendingInput = {nodeId:string;variable:string;label:string;prompt:string;executionId?:string;scopePath?:string[];iteration?:number;browserSessionId?:string;viewUrl?:string};
 type FlowEvent = {
   runId:string;seq:number;nodeId:string;
+  executionId?:string;scopePath?:string[];iteration?:number;resourceId?:string;
   status:"pending"|"running"|"waiting_input"|"success"|"error"|"skipped"|"cancelled";
   time:string;durationMs?:number;errorCode?:string;message?:string;
 };
 type Step = {
   nodeId:string;label:string;kind:string;
+  executionId?:string;scopePath?:string[];iteration?:number;resourceId?:string;
   status:"success"|"error"|"skipped"|"cancelled";
   durationMs:number;result:any;error?:string;errorCode?:string;
 };
@@ -307,7 +384,7 @@ type RunResult = {
 };
 ```
 
-Events have strictly increasing sequence numbers and UTC timestamps; running events come from actual execution. Polling terminal `result` contains only status and step metadata: step `result`, variables and output are null. Fetch `/result` once for full output/variables, or a single node detail on demand. Runtime event messages and polling summaries use safe error text; complete diagnostic URLs are available only in explicitly requested details. Keep runtime state separate from project design/export data.
+Events have strictly increasing sequence numbers and UTC timestamps; running events come from actual execution. Nested/loop events identify their execution instance, region path and one-based iteration instead of overwriting all rounds by node ID. Proxy failures can also identify the resource block. Polling terminal `result` contains only status and step metadata: step `result`, variables and output are null. Fetch `/result` once for full output/variables, or a single execution-instance detail on demand. Runtime event messages and polling summaries use safe error text; complete diagnostic URLs are available only in explicitly requested details. Keep runtime state separate from project design/export data.
 
 Each run takes an immutable copy of nodes, edges, headers and inputs. Canvas edits affect the next run. Asynchronous flow lifetime is at most 10 minutes including manual waits; synchronous lifetime is 120 seconds. Both APIs share two active slots. Cancellation marks the view immediately but retains its slot until the actual worker exits, and a late response cannot overwrite cancellation. Terminal results last 15 minutes, at most 128 tasks. Storage is memory-only and restarts lose task IDs/results.
 
@@ -315,7 +392,7 @@ Each run takes an immutable copy of nodes, edges, headers and inputs. Canvas edi
 
 Replay HTTP total timeout is 25 seconds per request; response-header timeout is 20 seconds; connect/TLS timeout is 10 seconds. At most eight redirects are followed, HTTPS-to-HTTP downgrade is denied, TLS is 1.2 or newer and no environment proxy is used. All DNS answers and the concrete dial address are checked against the guard, including redirects and DNS rebinding. Private, loopback, link-local, metadata and reserved destinations are blocked for replay. An explicitly configured local model provider is allowed by the separate Agent guard, while metadata destinations remain blocked.
 
-Request/rendered fields and manual/input values are limited to 2 MiB. A replay response is limited to 2 MiB and total flow response bodies to 8 MiB. Aggregate JSON/query substitution expansion is bounded. No external request occurs during HAR parsing, preflight or canvas editing.
+Request/rendered fields and manual/input values are limited to 2 MiB. A replay response is limited to 2 MiB and total flow response bodies to 8 MiB; retained execution-result JSON has an additional 8 MiB aggregate budget. These limits include loop iterations. Aggregate JSON/query substitution expansion is bounded. Browser actions have their own bounded timeouts and context capacity, and screenshots are viewport-sized. No external business request occurs during HAR parsing, preflight or ordinary canvas editing; explicit Agent calls contact the configured provider and explicit proxy testing contacts its diagnostic target.
 
 ## Serving and delivery
 

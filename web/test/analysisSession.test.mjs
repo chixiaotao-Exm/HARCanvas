@@ -6,6 +6,13 @@ import { analyzeInBatches } from '../src/agentBatches.ts';
 const request = id => ({id,method:'GET',url:`https://example.invalid/${id}`,domain:'example.invalid',path:`/${id}`,category:'api',mimeType:'application/json',status:200,duration:1,headers:{},body:'',responseBody:'{}',responseHeaders:{},query:{}});
 const suggestion = requestId => ({requestId,label:'读取记录',description:'读取录制中的记录，并返回其状态。',category:'api',confidence:'high',dependencies:[],variables:[]});
 
+test('repeated cumulative progress does not grow the same explanation summary on each poll',()=>{
+ let result={summary:'原来的说明',suggestions:[suggestion('a')],warnings:[]};
+ const progress={summary:'原来的说明\n\n新资料的说明',suggestions:[suggestion('b')],warnings:['提示']};
+ for(let i=0;i<50;i++)result=retainAnalysis(result,progress);
+ assert.equal(result.summary,'原来的说明\n\n新资料的说明');assert.equal(result.suggestions.length,2);assert.equal(result.warnings.length,1);
+});
+
 test('only useful explanations skip new paid calls; unanalysed and malformed records stay pending', () => {
   const source = ['a','b','c'].map(request);
   const baseline = {summary:'已有说明',suggestions:[suggestion('a'),{...suggestion('b'),description:' '},suggestion('outside')],warnings:[]};

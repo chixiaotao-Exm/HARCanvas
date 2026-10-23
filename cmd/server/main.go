@@ -20,6 +20,7 @@ func main() {
 	requireAuth := flag.Bool("require-auth", false, "Refuse startup unless HAR_CANVAS_USER and HAR_CANVAS_PASSWORD are both nonempty")
 	flag.Parse()
 	handler := app.NewServer(*web)
+	defer handler.Close()
 	handler.SampleHAR = *sampleHAR
 	protectedHandler, err := app.ConfiguredBasicAuth(handler, os.Getenv("HAR_CANVAS_USER"), os.Getenv("HAR_CANVAS_PASSWORD"), *requireAuth)
 	if err != nil {

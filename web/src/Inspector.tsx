@@ -5,6 +5,7 @@ import {blockMeta} from './WorkspaceNode';
 import ResponseFields from './ResponseFields';
 import {listFields} from './bindings';
 import './repairPanel.css';
+import {ResourceFields} from './ResourceFields';
 export function parseReference(text:string):unknown{if(text.length>2*1024*1024)return undefined;try{return JSON.parse(text);}catch{return text||undefined;}}
 const names:Record<string,string>={email:'邮箱',username:'用户名',password:'密码',orderId:'订单编号',id:'编号',code:'验证码',token:'访问凭据',csrf:'会话校验值',phone:'手机号码',name:'名称'};
 export default function Inspector({node,nodes,requests,onChange,onDelete,result,onLoadResult,loadingResult,focusField,onDraftIssue,headerDraft,onRepair}:{node?:FlowNode;nodes:FlowNode[];requests:HarRequest[];onChange:(patch:Partial<BlockData>)=>void;onDelete:()=>void;result?:RunResult['steps'][number];onLoadResult:()=>void;loadingResult:boolean;focusField:string;onDraftIssue:(nodeId:string,message:string,text:string)=>void;headerDraft?:{text:string;error:string};onRepair?:()=>void}){
@@ -16,6 +17,7 @@ export default function Inspector({node,nodes,requests,onChange,onDelete,result,
  return <div className="inspector-body" key={node.id}><div className="inspector-title"><span style={{color:info.color}}><Icon size={20}/></span><div><small>{info.name}</small><h3>{d.label}</h3></div><button className="icon-button danger" onClick={onDelete} aria-label="删除选中积木"><Trash2 size={15}/></button></div>
   <label className="field">步骤名称<input data-field="label" value={d.label} onChange={e=>onChange({label:e.target.value})}/></label><label className="field">用途说明<textarea rows={3} value={d.description??''} onChange={e=>onChange({description:e.target.value})}/></label>
   {d.groupLabel&&<div className="hint">所属业务组：{d.groupLabel}</div>}
+  <ResourceFields nodeId={node.id} data={d} nodes={nodes} onChange={onChange}/>
   {d.kind==='request'&&<>
    <div className="section-heading"><h4>执行准备</h4><span className={`readiness ${d.readiness??'ready'}`}>{{ready:'已就绪','missing-input':'需要补充输入',manual:'需要人工处理',unsupported:'暂不支持'}[d.readiness??'ready']||'待确认'}</span></div>
    {d.uncertainty&&<p className="warning-box">{d.uncertainty}</p>}

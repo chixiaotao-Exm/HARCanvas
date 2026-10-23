@@ -79,7 +79,8 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
     const group=groupByRequest.get(block.request.id);
     const generatedKey=`${datasetKey}:${block.request.id}`;
     const id=reserveId(`har-${stableId(generatedKey)}`,nodeIds);
-    const groupId=suggestion.group?.trim()?`model:${suggestion.group.trim().slice(0,100)}`:group?.id;
+    const localGroupId=suggestion.group?.trim()?`model:${suggestion.group.trim().slice(0,100)}`:group?.id;
+    const groupId=localGroupId&&block.request.captureId?`${block.request.captureId}:${localGroupId}`:localGroupId;
     const layoutKey=groupId??`request:${block.request.id}`;
     let layout=groupLayout.get(layoutKey);
     if(!layout){layout={x:nextGroupX,y:60};groupLayout.set(layoutKey,layout);nextGroupX+=360;}
@@ -97,7 +98,7 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
     const evidence=[...(suggestion.evidence??[]),...relations.map(r=>r.evidence)];
     const uncertainty=[suggestion.uncertainty||(sensitive?'包含抓包时的会话或动态字段，请通过参数向导检查后再运行。':''),...bindingWarnings].filter(Boolean).join('\n');
     const data:BlockData&GenerationMetadata={...block.data,generatedKey,groupId,groupLabel:suggestion.group?.trim().slice(0,100)||group?.label,readiness,evidence:evidence.length?evidence:[`原始记录 ${block.request.id} · ${block.request.method} · HTTP ${block.request.status}`],uncertainty,inputs:suggestion.inputs??suggestion.variables.map(v=>`${v.name}：${v.description}`),outputs:suggestion.outputs??[],dependencies:validDependencies(suggestion.dependencies),...(bindings.length?{bindings}:{})};
-    const inputData=addUserInputBindings({...data,...(suggestion.inputFields!==undefined?{inputFieldsReviewed:true}:{})},suggestion.inputFields);
+    const inputData=addUserInputBindings({...data,...(block.request.captureId?{captureId:block.request.captureId,originalRequestId:block.request.originalRequestId}:{}),...(suggestion.inputFields!==undefined?{inputFieldsReviewed:true}:{})},suggestion.inputFields);
     nextNodes.push({id,type:'block',position:{x:layout.x,y:layout.y},data:inputData});
     layout.y+=nodeSpacing(inputData);
     known.set(block.request.id,id);newIds.add(id);addedCount++;

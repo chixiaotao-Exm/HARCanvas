@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {followRunJob,cancelRunJob,postJSON,ApiError} from '../src/runJobs.ts';
+import {followRunJob,cancelRunJob,postJSON,ApiError,loadRunStepResult} from '../src/runJobs.ts';
 
 const id='test-job';
 const event=(seq,status='success')=>({runId:id,seq,nodeId:'request',status,time:'2026-10-23T00:00:00.000Z'});
@@ -30,4 +30,17 @@ test('explicit cancellation sends one DELETE and validates its returned task ide
 
 test('execution POST errors retain structured validation and are never retried',async()=>{
  let calls=0;const validation={valid:false,issues:[{code:'source_deleted',nodeId:'request',field:'source',message:'来源已删除',suggestedAction:'重新选择'}],entryNodeIds:['request'],reachableNodeIds:['request']};await withFetch(async(_route,init)=>{calls++;assert.equal(init.method,'POST');return response(validation,400);},async()=>{await assert.rejects(postJSON('/api/flow/jobs',{nodes:[]}),error=>error instanceof ApiError&&error.status===400&&error.data.issues[0].code==='source_deleted'&&error.message.includes('test-request'));});assert.equal(calls,1);
+});
+
+test('exact iteration result queries carry execution identity and reject stale different instances',async()=>{
+ const step={nodeId:'request',executionId:'repeat:2/request',scopePath:['repeat:2'],iteration:2,label:'请求',kind:'request',status:'success',durationMs:3,result:{ok:true}};
+ await withFetch(async route=>{assert.equal(route,'/api/flow/jobs/test-job/results/request?executionId=repeat%3A2%2Frequest');return response(step);},async()=>{assert.equal((await loadRunStepResult(id,'request',step.executionId)).iteration,2);});
+ await withFetch(async()=>response({...step,executionId:'repeat:1/request'}),async()=>assert.rejects(loadRunStepResult(id,'request',step.executionId),/不同或无效/));
+});
+test('polling validates loop scopes and browser handoff paths before rendering them',async()=>{
+ const instance={...event(1),executionId:'repeat:2/request',scopePath:['repeat:2'],iteration:2};
+ await withFetch(async()=>response(view({seq:1,events:[instance]})),async()=>{await followRunJob(id,new AbortController().signal,job=>assert.equal(job.events[0].iteration,2));});
+ for(const bad of [{...instance,scopePath:'repeat:2'},{...instance,iteration:-1},{...instance,scopePath:Array(5).fill('x')}])await withFetch(async()=>response(view({seq:1,events:[bad]})),async()=>assert.rejects(followRunJob(id,new AbortController().signal,()=>assert.fail('bad scope delivered'))));
+ const pending={nodeId:'verify',variable:'done',label:'完成验证',browserSessionId:'a'.repeat(48),viewUrl:'https://untrusted.invalid/view'};
+ await withFetch(async()=>response(view({status:'waiting_input',pendingInput:pending})),async()=>assert.rejects(followRunJob(id,new AbortController().signal,()=>assert.fail('untrusted viewer delivered'))));
 });

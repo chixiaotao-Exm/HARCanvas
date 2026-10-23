@@ -1,0 +1,10 @@
+.run-history-row{border:1px solid var(--border,#dce3ed);border-radius:10px;overflow:hidden;background:var(--panel,#fff)}
+.run-history-row .run-step{border:0;border-radius:0;width:100%}
+.run-history-actions{display:flex;justify-content:flex-end;gap:12px;padding:2px 12px 8px}
+.run-scope-label{color:var(--accent,#4f6be7)!important;font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.run-instance-detail{border:1px solid var(--border,#dce3ed);padding:14px;border-radius:12px;margin-top:12px;min-width:0}
+.run-instance-detail pre{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
+.manual-prompt .browser-session-view{width:100%;text-align:left;margin:12px 0}
+.run-list-pagination{margin:10px 0 14px;padding-top:8px;border-top:1px solid var(--border,#dce3ed)}
+.run-list-pagination p{margin:0 0 8px;color:var(--muted,#64748b);font-size:12px;line-height:1.6}
+.run-list-pagination button{white-space:normal;line-height:1.5}

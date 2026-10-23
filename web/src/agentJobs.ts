@@ -28,7 +28,7 @@ export type AgentJobDependencies = {
   onProgress?: (progress: AgentJobProgress) => void;
 };
 type ResponseMeta = { status: number; requestId?: string };
-type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; mode?: unknown; analysis?: unknown; overview?:unknown; repair?:unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
+type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; mode?: unknown; analysis?: unknown; overview?:unknown; repair?:unknown; chat?:unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
 
 export class AgentJobError extends Error {
   status?: number;
@@ -85,10 +85,10 @@ function jobFailureMessage(meta: ResponseMeta, detail: string) {
 }
 
 /** One shared lifecycle for detail and overview jobs, without model retries. */
-async function runAgentJob<T>(
+export async function runAgentJob<T>(
   signal: AbortSignal,
   dependencies: AgentJobDependencies,
-  contract:{mode:'detail'|'overview'|'repair';payload:()=>unknown;result:(job:JobResponse,meta:ResponseMeta,jobId:string)=>T},
+  contract:{mode:'detail'|'overview'|'repair'|'chat';payload:()=>unknown;result:(job:JobResponse,meta:ResponseMeta,jobId:string)=>T},
 ): Promise<T> {
   const fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
   const sleep = dependencies.sleep ?? sleepForAgentJob;

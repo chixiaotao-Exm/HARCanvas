@@ -19,6 +19,7 @@ type AgentJobView struct {
 	Analysis  *Analysis         `json:"analysis,omitempty"`
 	Overview  *OverviewResult   `json:"overview,omitempty"`
 	Repair    *RepairPlan       `json:"repair,omitempty"`
+	Chat      *ChatPlan         `json:"chat,omitempty"`
 	Error     string            `json:"error,omitempty"`
 	ErrorCode string            `json:"errorCode,omitempty"`
 	Progress  *AnalysisProgress `json:"progress,omitempty"`
@@ -198,6 +199,7 @@ func (s *agentJobStore) finish(id, status string, result agentJobResult, failure
 		job.view.Analysis = result.Analysis
 		job.view.Overview = result.Overview
 		job.view.Repair = result.Repair
+		job.view.Chat = result.Chat
 		if failure != nil {
 			job.view.Error = failure.Error()
 			job.view.ErrorCode = failure.Code
@@ -219,12 +221,13 @@ func (s *Server) createAgentJob(w http.ResponseWriter, r *http.Request) {
 		Context  AnalysisContext `json:"context"`
 		Overview *OverviewInput  `json:"overview"`
 		Repair   *RepairInput    `json:"repair"`
+		Chat     *ChatInput      `json:"chat"`
 	}
 	if !decodeBody(w, r, &input) {
 		return
 	}
-	if input.Mode != "" && input.Mode != "detail" && input.Mode != "overview" && input.Mode != "repair" {
-		writeError(w, http.StatusBadRequest, "分析模式必须为 detail、overview 或 repair。")
+	if input.Mode != "" && input.Mode != "detail" && input.Mode != "overview" && input.Mode != "repair" && input.Mode != "chat" {
+		writeError(w, http.StatusBadRequest, "分析模式必须为 detail、overview、repair 或 chat。")
 		return
 	}
 	if input.Mode == "overview" {
@@ -258,6 +261,23 @@ func (s *Server) createAgentJob(w http.ResponseWriter, r *http.Request) {
 		input.Context = AnalysisContext{}
 		input.Overview = nil
 	}
+	if input.Mode == "chat" {
+		if input.Chat == nil {
+			writeError(w, http.StatusBadRequest, "Agent 对话需要 chat 画布目录。")
+			return
+		}
+		clean, _, err := prepareChat(*input.Chat)
+		if err != nil {
+			failure := publicAnalysisError(err)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": failure.Error(), "errorCode": failure.Code})
+			return
+		}
+		input.Chat = &clean
+		input.Requests = nil
+		input.Context = AnalysisContext{}
+		input.Overview = nil
+		input.Repair = nil
+	}
 	select {
 	case s.agentSlots <- struct{}{}:
 	default:
@@ -278,12 +298,16 @@ func (s *Server) createAgentJob(w http.ResponseWriter, r *http.Request) {
 		requestCount = len(input.Overview.Requests)
 	} else if input.Mode == "repair" {
 		requestCount = len(input.Repair.Nodes)
+	} else if input.Mode == "chat" {
+		requestCount = len(input.Chat.Nodes)
 	}
 	log.Printf("agent_job event=start request_id=%s job_id=%s requests=%d", requestID, view.ID, requestCount)
 	if input.Mode == "overview" {
 		go s.runOverviewAgentJob(ctx, cancel, view.ID, requestID, input.Config, *input.Overview)
 	} else if input.Mode == "repair" {
 		go s.runRepairAgentJob(ctx, cancel, view.ID, requestID, input.Config, *input.Repair)
+	} else if input.Mode == "chat" {
+		go s.runChatAgentJob(ctx, cancel, view.ID, requestID, input.Config, *input.Chat)
 	} else {
 		go s.runAgentJob(ctx, cancel, view.ID, requestID, input.Config, input.Requests, input.Context)
 	}
@@ -351,6 +375,17 @@ type agentJobResult struct {
 	Analysis *Analysis
 	Overview *OverviewResult
 	Repair   *RepairPlan
+	Chat     *ChatPlan
+}
+
+func (s *Server) runChatAgentJob(ctx context.Context, cancel context.CancelFunc, id, requestID string, config AgentConfig, input ChatInput) {
+	s.runAnalysisJob(ctx, cancel, id, requestID, len(input.Nodes), func(ctx context.Context, observer AnalysisObserver) (agentJobResult, error) {
+		result, err := s.Analyzer.AnalyzeChat(ctx, config, input, observer)
+		if err != nil {
+			return agentJobResult{}, err
+		}
+		return agentJobResult{Chat: &result}, nil
+	})
 }
 
 func (s *Server) runAnalysisJob(ctx context.Context, cancel context.CancelFunc, id, requestID string, requestCount int, analyze func(context.Context, AnalysisObserver) (agentJobResult, error)) {

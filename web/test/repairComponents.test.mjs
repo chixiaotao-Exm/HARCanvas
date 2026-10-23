@@ -37,6 +37,30 @@ test('run preparation groups several conditions by step and keeps technical deta
  assert.match(html,/修补表单在运行页内/);assert.ok(buttons(html).some(button=>button.text==='让 Agent 帮我修补'&&!disabled(button)));
 });
 
+test('large run preparation starts with twenty fields and positions while keeping all totals and expansion controls',()=>{
+ for(const count of [200,1000]){
+  const props=runProps();props.nodes=Array.from({length:count},(_,index)=>({...node(`step-${index}`),data:{...node(`step-${index}`).data,bindings:[{id:'email',name:`邮箱 ${index}`,target:'body',path:'email',mode:'user'}]}}));
+  props.parameterNodeIds=props.nodes.map(node=>node.id);props.issues=props.nodes.map(node=>({nodeId:node.id,code:'MISSING_INPUT',message:`准备 ${node.id}`}));
+  const html=render(RunPanel,props);
+  assert.equal([...html.matchAll(/<input\b/g)].length,20);assert.equal([...html.matchAll(/class="run-preparation-item"/g)].length,20);
+  assert.ok(html.includes(`填写业务参数 · 共 ${count} 项`));assert.ok(html.includes(`已显示 20 项参数，共 ${count} 项`));assert.ok(html.includes(`已显示 20 个准备位置，共 ${count} 个`));
+  const controls=buttons(html);assert.ok(controls.some(button=>button.text==='显示更多参数（20 项）'));assert.ok(controls.some(button=>button.text==='显示更多准备事项（20 个位置）'));
+ }
+});
+
+test('one step with many preparation errors bounds its detail list and exposes all remaining checks',()=>{
+ const props=runProps();props.issues=Array.from({length:1000},(_,index)=>({nodeId:'step-1',code:`CHECK_${index}`,message:`需要检查 ${index}`}));
+ const html=render(RunPanel,props);
+ assert.equal([...html.matchAll(/<code>CHECK_/g)].length,20);assert.ok(html.includes('查看检查详情 · 1000 项'));assert.ok(html.includes('已显示 20 项检查详情，共 1000 项'));
+ assert.ok(buttons(html).some(button=>button.text==='显示更多检查详情（20 项）'));
+});
+
+test('already flattened nested nodes do not duplicate business input fields',()=>{
+ const props=runProps(),leaf={...node('leaf'),data:{...node('leaf').data,bindings:[{id:'email',name:'收件邮箱',target:'body',path:'email',mode:'user'}]}};
+ props.nodes=[{id:'loop',type:'block',position:{x:0,y:0},data:{kind:'loop',label:'循环',loop:{nodes:[leaf],edges:[]}}},leaf];props.parameterNodeIds=['leaf'];
+ const html=render(RunPanel,props);assert.equal([...html.matchAll(/<input\b/g)].length,1);assert.ok(html.includes('填写业务参数 · 共 1 项'));
+});
+
 test('active runs keep stop available and disable repair and new execution entries',()=>{
  const props=runProps();props.job={id:'run-1',status:'running',seq:0};
  const controls=buttons(render(RunPanel,props));

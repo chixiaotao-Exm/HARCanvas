@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,8 +25,11 @@ var variableName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]{0,127}$`)
 var templateReference = regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
 
 type Runner struct {
-	Client *http.Client
-	Guard  *NetworkGuard
+	Client        *http.Client
+	Guard         *NetworkGuard
+	Browser       BrowserExecutor
+	savedOnce     sync.Once
+	savedSessions *savedSessionStore
 }
 
 func NewRunner() *Runner {

@@ -1,9 +1,16 @@
 import type { Edge, Node } from '@xyflow/react';
-export type Kind = 'input' | 'request' | 'extract' | 'condition' | 'output' | 'manual' | 'assertion';
+export type Kind = 'input' | 'request' | 'extract' | 'condition' | 'output' | 'manual' | 'assertion' | 'proxy' | 'profile' | 'browserSession' | 'browser' | 'browserVerification' | 'loop' | 'subflow' | 'break';
+export type ProxyConfig={url:string;sessionToken?:string;rotation:'fixed'|'run'|'request'|'minutes';rotationMinutes?:number;credentialsMissing?:boolean};
+export type BrowserProfileConfig={id?:string;name?:string;browser:'chromium'|'firefox'|'webkit';locale:string;timezone:string;viewport:{width:number;height:number};userAgent?:string};
+export type SessionConfig={name:string;proxyId?:string;profileId?:string;persist?:boolean};
+export type LoopConfig={mode:'count'|'each';count:number;items:string;itemVariable:string;indexVariable:string;nodes:FlowNode[];edges:FlowEdge[];entryId?:string;continueOnError?:boolean;freshSession?:boolean};
+export type ResourceBinding={id:string;resourceId:string;targetId:string};
 export type ParameterBinding = {id:string;name:string;target:'body'|'header'|'query'|'url';path:string;mode:'fixed'|'user'|'upstream'|'runtime'|'manual';value?:string;source?:string;sourcePath?:string;generator?:'uuid'|'timestamp'|'random';required?:boolean;evidence?:string;placeholder?:string};
 export type UserInputField = {name:string;target:'body'|'query';path:string;placeholder?:string;required?:boolean};
 export type BlockData = {
   kind: Kind; label: string; description?: string; requestId?: string; method?: string; url?: string;
+  captureId?:string;originalRequestId?:string;sessionId?:string;proxyId?:string;profileId?:string;proxy?:ProxyConfig;profile?:BrowserProfileConfig;session?:SessionConfig;loop?:LoopConfig;
+  browserAction?:'navigate'|'click'|'fill'|'read'|'wait';selector?:string;text?:string;
   headers?: Record<string, string>; body?: string; variable?: string; value?: string; source?: string;
   path?: string; operator?: string; expected?: string; template?: string;
   acceptStatus?:string; bindings?:ParameterBinding[]; generatedKey?:string; groupId?:string; groupLabel?:string;
@@ -11,15 +18,15 @@ export type BlockData = {
 };
 export type FlowNode = Node<BlockData, 'block'>;
 export type FlowEdge = Edge;
-export type HarRequest = { id: string; method: string; url: string; domain: string; path: string; category: string; mimeType: string; status: number; duration: number; headers: Record<string,string>; body: string; responseBody: string; responseHeaders: Record<string,string>; query:Record<string,string>;responseBodyTruncated?:boolean;responseBodyBytes?:number;responseDetailUrl?:string;pageId?:string;startedDateTime?:string;startedAt?:string };
+export type HarRequest = { id: string; captureId?:string;originalRequestId?:string; method: string; url: string; domain: string; path: string; category: string; mimeType: string; status: number; duration: number; headers: Record<string,string>; body: string; responseBody: string; responseHeaders: Record<string,string>; query:Record<string,string>;responseBodyTruncated?:boolean;responseBodyBytes?:number;responseDetailUrl?:string;pageId?:string;startedDateTime?:string;startedAt?:string };
 export type Suggestion = {requestId:string; label:string; description:string; category:string; dependencies:string[]; confidence:string; variables:{name:string;source:string;description:string}[];group?:string;inputs?:string[];outputs?:string[];evidence?:string[];uncertainty?:string;readiness?:string;inputFields?:UserInputField[]};
 export type Analysis = {summary:string; suggestions:Suggestion[]; warnings:string[]};
 export type AgentConfig = {baseUrl:string;apiKey:string;model:string};
-export type RunResult = { status: 'success'|'error'|'cancelled'; steps:{nodeId:string;label:string;kind:Kind;status:'success'|'error'|'skipped'|'cancelled';durationMs:number;result:unknown;error?:string;errorCode?:string}[];variables:Record<string,unknown>|null;output:unknown };
+export type RunResult = { status: 'success'|'error'|'cancelled'; steps:{nodeId:string;executionId?:string;scopePath?:string[];iteration?:number;resourceId?:string;label:string;kind:Kind;status:'success'|'error'|'skipped'|'cancelled';durationMs:number;result:unknown;error?:string;errorCode?:string}[];variables:Record<string,unknown>|null;output:unknown };
 export type HarSummary = {total:number;api:number;static:number;domains:string[]};
 export type PreflightIssue={code:string;nodeId?:string;field?:string;message:string;suggestedAction?:string};
 export type PreflightResult={valid:boolean;issues:PreflightIssue[];entryNodeIds:string[];entryId?:string;reachableNodeIds:string[]};
 export type RuntimeStatus='pending'|'running'|'waiting_input'|'success'|'error'|'skipped'|'cancelled';
-export type RunEvent={runId:string;seq:number;nodeId:string;status:RuntimeStatus;time:string;durationMs?:number;errorCode?:string;message?:string};
-export type RunJob={id:string;status:'running'|'waiting_input'|'completed'|'failed'|'cancelled';events:RunEvent[];seq:number;pendingInput?:{nodeId:string;variable:string;label:string;prompt?:string};result?:RunResult;error?:string};
+export type RunEvent={runId:string;executionId?:string;scopePath?:string[];iteration?:number;resourceId?:string;seq:number;nodeId:string;status:RuntimeStatus;time:string;durationMs?:number;errorCode?:string;message?:string};
+export type RunJob={id:string;status:'running'|'waiting_input'|'completed'|'failed'|'cancelled';events:RunEvent[];seq:number;pendingInput?:{nodeId:string;executionId?:string;scopePath?:string[];iteration?:number;browserSessionId?:string;viewUrl?:string;variable:string;label:string;prompt?:string};result?:RunResult;error?:string};
 export type ParseResult={requests:HarRequest[];summary:HarSummary;warnings:string[];pages?:{id:string;title:string;startedDateTime?:string}[]};

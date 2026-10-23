@@ -15,6 +15,7 @@ import (
 
 type Server struct {
 	Runner      *Runner
+	Browser     *BrowserRuntime
 	Analyzer    *Analyzer
 	WebDir      string
 	SampleHAR   string
@@ -31,8 +32,13 @@ type Server struct {
 
 func NewServer(webDir string) *Server {
 	uploadSlots := make(chan struct{}, 2)
-	return &Server{Runner: NewRunner(), Analyzer: NewAnalyzer(), WebDir: webDir, SampleHAR: filepath.Join("samples", "re.har"), runSlots: make(chan struct{}, 2), agentSlots: make(chan struct{}, 2), jobs: newAgentJobStore(), flowJobs: newFlowJobStore(), uploads: newHARUploadStore(), uploadSlots: uploadSlots, imports: newHARImportStore(uploadSlots)}
+	runner := NewRunner()
+	browser := NewBrowserRuntime(BrowserRuntimeOptions{Guard: runner.Guard})
+	runner.Browser = browser
+	return &Server{Runner: runner, Browser: browser, Analyzer: NewAnalyzer(), WebDir: webDir, SampleHAR: filepath.Join("samples", "re.har"), runSlots: make(chan struct{}, 2), agentSlots: make(chan struct{}, 2), jobs: newAgentJobStore(), flowJobs: newFlowJobStore(), uploads: newHARUploadStore(), uploadSlots: uploadSlots, imports: newHARImportStore(uploadSlots)}
 }
+
+func (s *Server) Close() error { return s.Browser.Close() }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -112,6 +118,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.validateFlow(w, r)
+		case "/api/proxy/test":
+			if r.Method != "POST" {
+				methodError(w, "POST")
+				return
+			}
+			s.testProxy(w, r)
 		case "/api/flow/jobs":
 			if r.Method != "POST" {
 				methodError(w, "POST")
@@ -146,7 +158,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, 200, result)
 		default:
-			if strings.HasPrefix(r.URL.Path, "/api/har/imports/") {
+			if strings.HasPrefix(r.URL.Path, "/api/browser/sessions/") {
+				s.Browser.ServeHTTP(w, r)
+			} else if strings.HasPrefix(r.URL.Path, "/api/har/imports/") {
 				s.serveHARImport(w, r, strings.TrimPrefix(r.URL.Path, "/api/har/imports/"))
 			} else if strings.HasPrefix(r.URL.Path, "/api/har/uploads/") {
 				s.serveUploadedHAR(w, r, strings.TrimPrefix(r.URL.Path, "/api/har/uploads/"))

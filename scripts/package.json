@@ -1,0 +1,12 @@
+{
+  "name": "har-canvas-browser-worker",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=20"},
+  "scripts": {
+    "install:chromium": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.64.1"
+  }
+}

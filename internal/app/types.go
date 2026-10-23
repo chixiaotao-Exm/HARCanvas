@@ -80,22 +80,83 @@ type Analysis struct {
 	Warnings    []string     `json:"warnings"`
 }
 type BlockData struct {
-	Kind         string            `json:"kind"`
-	Label        string            `json:"label"`
-	Description  string            `json:"description,omitempty"`
-	RequestID    string            `json:"requestId,omitempty"`
-	Method       string            `json:"method,omitempty"`
-	URL          string            `json:"url,omitempty"`
-	Headers      map[string]string `json:"headers,omitempty"`
-	Body         string            `json:"body,omitempty"`
-	Variable     string            `json:"variable,omitempty"`
-	Value        string            `json:"value,omitempty"`
-	Source       string            `json:"source,omitempty"`
-	Path         string            `json:"path,omitempty"`
-	Operator     string            `json:"operator,omitempty"`
-	Expected     string            `json:"expected,omitempty"`
-	Template     string            `json:"template,omitempty"`
-	AcceptStatus string            `json:"acceptStatus,omitempty"`
+	Kind              string                `json:"kind"`
+	Label             string                `json:"label"`
+	Description       string                `json:"description,omitempty"`
+	RequestID         string                `json:"requestId,omitempty"`
+	Method            string                `json:"method,omitempty"`
+	URL               string                `json:"url,omitempty"`
+	Headers           map[string]string     `json:"headers,omitempty"`
+	Body              string                `json:"body,omitempty"`
+	Variable          string                `json:"variable,omitempty"`
+	Value             string                `json:"value,omitempty"`
+	Source            string                `json:"source,omitempty"`
+	Path              string                `json:"path,omitempty"`
+	Operator          string                `json:"operator,omitempty"`
+	Expected          string                `json:"expected,omitempty"`
+	Template          string                `json:"template,omitempty"`
+	AcceptStatus      string                `json:"acceptStatus,omitempty"`
+	CaptureID         string                `json:"captureId,omitempty"`
+	OriginalRequestID string                `json:"originalRequestId,omitempty"`
+	BrowserAction     string                `json:"browserAction,omitempty"`
+	Selector          string                `json:"selector,omitempty"`
+	Text              string                `json:"text,omitempty"`
+	SessionID         string                `json:"sessionId,omitempty"`
+	ProxyID           string                `json:"proxyId,omitempty"`
+	ProfileID         string                `json:"profileId,omitempty"`
+	Proxy             *ProxyConfig          `json:"proxy,omitempty"`
+	Profile           *BrowserProfileConfig `json:"profile,omitempty"`
+	Session           *SessionConfig        `json:"session,omitempty"`
+	Loop              *LoopConfig           `json:"loop,omitempty"`
+}
+
+type ProxyConfig struct {
+	CredentialsMissing bool   `json:"credentialsMissing,omitempty"`
+	URL                string `json:"url"`
+	SessionToken       string `json:"sessionToken,omitempty"`
+	Rotation           string `json:"rotation,omitempty"`
+	RotationMinutes    int    `json:"rotationMinutes,omitempty"`
+}
+type BrowserViewport struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+type BrowserProfileConfig struct {
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Browser   string          `json:"browser,omitempty"`
+	Locale    string          `json:"locale,omitempty"`
+	Timezone  string          `json:"timezone,omitempty"`
+	Viewport  BrowserViewport `json:"viewport"`
+	UserAgent string          `json:"userAgent,omitempty"`
+}
+type SessionConfig struct {
+	Name      string `json:"name,omitempty"`
+	ProxyID   string `json:"proxyId,omitempty"`
+	ProfileID string `json:"profileId,omitempty"`
+	Persist   bool   `json:"persist,omitempty"`
+}
+type ResourceDefaults struct {
+	SessionID string `json:"sessionId,omitempty"`
+	ProxyID   string `json:"proxyId,omitempty"`
+	ProfileID string `json:"profileId,omitempty"`
+}
+type ResourceBinding struct {
+	ID         string `json:"id,omitempty"`
+	ResourceID string `json:"resourceId"`
+	TargetID   string `json:"targetId"`
+}
+type LoopConfig struct {
+	Mode            string     `json:"mode,omitempty"`
+	Count           int        `json:"count,omitempty"`
+	Items           string     `json:"items,omitempty"`
+	ItemVariable    string     `json:"itemVariable,omitempty"`
+	IndexVariable   string     `json:"indexVariable,omitempty"`
+	Nodes           []FlowNode `json:"nodes"`
+	Edges           []FlowEdge `json:"edges"`
+	EntryID         string     `json:"entryId,omitempty"`
+	ContinueOnError bool       `json:"continueOnError,omitempty"`
+	FreshSession    bool       `json:"freshSession,omitempty"`
 }
 type FlowNode struct {
 	ID       string          `json:"id"`
@@ -110,21 +171,28 @@ type FlowEdge struct {
 	SourceHandle string `json:"sourceHandle,omitempty"`
 }
 type Flow struct {
-	EntryID     string            `json:"entryId,omitempty"`
-	EntryNodeID string            `json:"entryNodeId,omitempty"`
-	Nodes       []FlowNode        `json:"nodes"`
-	Edges       []FlowEdge        `json:"edges"`
-	Inputs      map[string]string `json:"inputs"`
+	ProjectID        string            `json:"projectId,omitempty"`
+	EntryID          string            `json:"entryId,omitempty"`
+	EntryNodeID      string            `json:"entryNodeId,omitempty"`
+	Nodes            []FlowNode        `json:"nodes"`
+	Edges            []FlowEdge        `json:"edges"`
+	Inputs           map[string]string `json:"inputs"`
+	Defaults         ResourceDefaults  `json:"defaults,omitempty"`
+	ResourceBindings []ResourceBinding `json:"resourceBindings,omitempty"`
 }
 type Step struct {
-	NodeID     string `json:"nodeId"`
-	Label      string `json:"label"`
-	Kind       string `json:"kind"`
-	Status     string `json:"status"`
-	DurationMS int64  `json:"durationMs"`
-	Result     any    `json:"result"`
-	Error      string `json:"error,omitempty"`
-	ErrorCode  string `json:"errorCode,omitempty"`
+	ResourceID  string   `json:"resourceId,omitempty"`
+	ExecutionID string   `json:"executionId,omitempty"`
+	ScopePath   []string `json:"scopePath,omitempty"`
+	Iteration   int      `json:"iteration,omitempty"`
+	NodeID      string   `json:"nodeId"`
+	Label       string   `json:"label"`
+	Kind        string   `json:"kind"`
+	Status      string   `json:"status"`
+	DurationMS  int64    `json:"durationMs"`
+	Result      any      `json:"result"`
+	Error       string   `json:"error,omitempty"`
+	ErrorCode   string   `json:"errorCode,omitempty"`
 }
 type RunResult struct {
 	Status    string         `json:"status"`

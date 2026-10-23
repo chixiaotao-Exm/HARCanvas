@@ -1,4 +1,5 @@
 web/node_modules/
+scripts/node_modules/
 web/dist/
 *.exe
 *.log

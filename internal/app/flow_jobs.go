@@ -27,6 +27,7 @@ type flowJob struct {
 	id, status string
 	events     []FlowEvent
 	nodeStates map[string]string
+	instances  map[string]FlowEvent
 	nodeOrder  []string
 	steps      map[string]Step
 	seq        int64
@@ -113,7 +114,7 @@ func (s *flowJobStore) create(cancel context.CancelFunc, g *graph) (FlowJobView,
 		}
 		delete(s.items, oldestID)
 	}
-	job := &flowJob{id: id, status: "running", events: []FlowEvent{}, nodeStates: map[string]string{}, steps: map[string]Step{}, resume: make(chan string, 1), cancel: cancel}
+	job := &flowJob{id: id, status: "running", events: []FlowEvent{}, nodeStates: map[string]string{}, instances: map[string]FlowEvent{}, steps: map[string]Step{}, resume: make(chan string, 1), cancel: cancel}
 	for _, nodeID := range g.order {
 		if !g.reachable[nodeID] {
 			continue
@@ -127,6 +128,25 @@ func (s *flowJobStore) create(cancel context.CancelFunc, g *graph) (FlowJobView,
 }
 
 func (s *flowJobStore) appendEventLocked(job *flowJob, event FlowEvent) {
+	key := event.ExecutionID
+	if key == "" {
+		key = event.NodeID
+	}
+	if job.instances == nil {
+		job.instances = map[string]FlowEvent{}
+	}
+	if _, exists := job.instances[key]; !exists {
+		found := false
+		for _, id := range job.nodeOrder {
+			if id == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			job.nodeOrder = append(job.nodeOrder, key)
+		}
+	}
 	job.seq++
 	event.Seq = job.seq
 	event.RunID = job.id
@@ -134,7 +154,8 @@ func (s *flowJobStore) appendEventLocked(job *flowJob, event FlowEvent) {
 		event.Time = s.now().UTC()
 	}
 	job.events = append(job.events, event)
-	job.nodeStates[event.NodeID] = event.Status
+	job.nodeStates[key] = event.Status
+	job.instances[key] = event
 }
 func (s *flowJobStore) record(id string, event FlowEvent) {
 	s.mu.Lock()
@@ -143,7 +164,11 @@ func (s *flowJobStore) record(id string, event FlowEvent) {
 	if !ok || flowTerminal(job.status) {
 		return
 	}
-	if event.Status == "pending" && job.nodeStates[event.NodeID] == "pending" {
+	key := event.ExecutionID
+	if key == "" {
+		key = event.NodeID
+	}
+	if event.Status == "pending" && job.nodeStates[key] == "pending" {
 		return
 	}
 	s.appendEventLocked(job, event)
@@ -153,6 +178,9 @@ func (s *flowJobStore) saveStep(id string, step Step) {
 	defer s.mu.Unlock()
 	if job := s.items[id]; job != nil {
 		job.steps[step.NodeID] = step
+		if step.ExecutionID != "" {
+			job.steps[step.ExecutionID] = step
+		}
 	}
 }
 
@@ -209,7 +237,12 @@ func (s *flowJobStore) cancelJob(id string) (FlowJobView, bool) {
 		for _, nodeID := range job.nodeOrder {
 			switch job.nodeStates[nodeID] {
 			case "pending", "running", "waiting_input":
-				s.appendEventLocked(job, FlowEvent{NodeID: nodeID, Status: "cancelled", ErrorCode: "cancelled", Message: "运行已取消。"})
+				event := job.instances[nodeID]
+				event.Status = "cancelled"
+				event.ErrorCode = "cancelled"
+				event.Message = "运行已取消。"
+				event.Time = time.Time{}
+				s.appendEventLocked(job, event)
 			}
 		}
 		s.scheduleExpiryLocked()
@@ -231,7 +264,7 @@ func (s *flowJobStore) awaitInput(ctx context.Context, id string, pending Pendin
 	}
 	job.status = "waiting_input"
 	job.pending = &pending
-	s.appendEventLocked(job, FlowEvent{NodeID: pending.NodeID, Status: "waiting_input", Message: pending.Prompt})
+	s.appendEventLocked(job, FlowEvent{NodeID: pending.NodeID, ExecutionID: pending.ExecutionID, ScopePath: pending.ScopePath, Iteration: pending.Iteration, Status: "waiting_input", Message: pending.Prompt})
 	resume := job.resume
 	s.mu.Unlock()
 	select {
@@ -263,10 +296,10 @@ func (s *flowJobStore) resumeJob(id string, inputs map[string]string) (FlowJobVi
 	if len(value) > 2<<20 {
 		return FlowJobView{}, 413, "人工输入超过 2 MiB。"
 	}
-	nodeID := job.pending.NodeID
+	pending := *job.pending
 	job.pending = nil
 	job.status = "running"
-	s.appendEventLocked(job, FlowEvent{NodeID: nodeID, Status: "running", Message: "已收到人工输入，继续执行。"})
+	s.appendEventLocked(job, FlowEvent{NodeID: pending.NodeID, ExecutionID: pending.ExecutionID, ScopePath: pending.ScopePath, Iteration: pending.Iteration, Status: "running", Message: "已收到人工输入，继续执行。"})
 	job.resume <- value
 	return s.viewLocked(job, 0), 200, ""
 }
@@ -398,11 +431,18 @@ func (s *flowJobStore) failRemaining(id, code, message string) {
 		return
 	}
 	for _, nodeID := range job.nodeOrder {
+		event := job.instances[nodeID]
+		event.Time = time.Time{}
 		switch job.nodeStates[nodeID] {
 		case "running", "waiting_input":
-			s.appendEventLocked(job, FlowEvent{NodeID: nodeID, Status: "error", ErrorCode: code, Message: message})
+			event.Status = "error"
+			event.ErrorCode = code
+			event.Message = message
+			s.appendEventLocked(job, event)
 		case "pending":
-			s.appendEventLocked(job, FlowEvent{NodeID: nodeID, Status: "skipped", Message: "前面的步骤失败，后续步骤已跳过。"})
+			event.Status = "skipped"
+			event.Message = "前面的步骤失败，后续步骤已跳过。"
+			s.appendEventLocked(job, event)
 		}
 	}
 }
@@ -444,6 +484,13 @@ func (s *Server) serveFlowJob(w http.ResponseWriter, r *http.Request, path strin
 			if !identifier.MatchString(nodeID) {
 				writeError(w, 404, "步骤结果不存在。")
 				return
+			}
+			if executionID := r.URL.Query().Get("executionId"); executionID != "" {
+				if len(executionID) > 1024 {
+					writeError(w, 400, "执行实例编号过长。")
+					return
+				}
+				nodeID = executionID
 			}
 		}
 		result, status := s.flowJobs.result(id, nodeID)
