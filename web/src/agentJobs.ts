@@ -1,5 +1,7 @@
 import type { AgentConfig, Analysis, HarRequest } from './types';
 import type { AnalysisContext } from './analysisContext';
+import {buildOverviewRequests,parseOverviewResult,OverviewInputError,OverviewResultError,type OverviewResult} from './overview.ts';
+export type {OverviewRequest,OverviewReason,OverviewResult} from './overview.ts';
 
 export const AGENT_JOB_POLL_MS = 1000;
 const CANCEL_TIMEOUT_MS = 2500;
@@ -25,7 +27,7 @@ export type AgentJobDependencies = {
   onProgress?: (progress: AgentJobProgress) => void;
 };
 type ResponseMeta = { status: number; requestId?: string };
-type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; analysis?: unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
+type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; mode?: unknown; analysis?: unknown; overview?:unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
 
 export class AgentJobError extends Error {
   status?: number;
@@ -81,14 +83,12 @@ function jobFailureMessage(meta: ResponseMeta, detail: string) {
   return `分析任务失败${correlation}。 ${detail}`;
 }
 
-/** Start one model job, then poll it. This function never retries a model call. */
-export async function analyzeViaJob(
-  config: AgentConfig,
-  requests: HarRequest[],
+/** One shared lifecycle for detail and overview jobs, without model retries. */
+async function runAgentJob<T>(
   signal: AbortSignal,
-  dependencies: AgentJobDependencies = {},
-  context?: AnalysisContext,
-): Promise<Analysis> {
+  dependencies: AgentJobDependencies,
+  contract:{mode:'detail'|'overview';payload:()=>unknown;result:(job:JobResponse,meta:ResponseMeta,jobId:string)=>T},
+): Promise<T> {
   const fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
   const sleep = dependencies.sleep ?? sleepForAgentJob;
   const emit = (event: AgentJobEvent) => { try { dependencies.onEvent?.(event); } catch { /* Logging must not alter job execution. */ } };
@@ -149,37 +149,40 @@ export async function analyzeViaJob(
   try {
     checkAbort(signal);
     // Serialize once before yielding so later UI edits cannot change this job.
-    const payload = JSON.stringify({ config: { ...config }, requests, context });
+    const payload = JSON.stringify(contract.payload());
     const submitted = await readJSON('/api/agent/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload }, '启动分析任务');
     // Retain a known identity even if the rest of the start response is invalid,
     // so a possibly accepted task can still be cancelled without resubmitting.
     if (record(submitted.body) && typeof submitted.body.id === 'string' && submitted.body.id.trim()) jobId = submitted.body.id;
-    if (!record(submitted.body) || typeof submitted.body.id !== 'string' || !submitted.body.id.trim() || submitted.body.status !== 'running' || submitted.meta.status !== 202) {
+    const modeMatches=(mode:unknown)=>contract.mode==='overview'?mode==='overview':mode===undefined||mode===''||mode==='detail';
+    if (!record(submitted.body) || typeof submitted.body.id !== 'string' || !submitted.body.id.trim() || submitted.body.status !== 'running' || submitted.meta.status !== 202 || !modeMatches(submitted.body.mode)) {
       throw new AgentJobError(failureMessage('启动分析任务的响应格式不正确', submitted.meta), { ...submitted.meta, jobId });
     }
     jobId = submitted.body.id;
     emit({ stage: 'submitted', jobId, ...submitted.meta });
     checkAbort(signal);
     report(submitted.body.progress, submitted.meta);
+    checkAbort(signal);
     while (true) {
       await sleep(AGENT_JOB_POLL_MS, signal);
       checkAbort(signal);
       const polled = await readJSON(`/api/agent/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, '查询分析任务');
       checkAbort(signal);
-      if (!record(polled.body) || polled.body.id !== jobId || !['running', 'completed', 'failed', 'cancelled'].includes(String(polled.body.status))) {
+      if (!record(polled.body) || polled.body.id !== jobId || !['running', 'completed', 'failed', 'cancelled'].includes(String(polled.body.status)) || !modeMatches(polled.body.mode)) {
         throw new AgentJobError(failureMessage('分析任务状态格式不正确', polled.meta), { ...polled.meta, jobId });
       }
       const job = polled.body as JobResponse;
       report(job.progress, polled.meta);
+      checkAbort(signal);
       if (job.status === 'running') continue;
       terminal = true;
       if (job.status === 'cancelled') throw abortError('服务器已取消该分析任务。');
       // HTTP 200 confirms the status query succeeded; it is not the model
       // failure's HTTP status and must not appear as an error code in the UI.
       if (job.status === 'failed') throw new AgentJobError(jobFailureMessage(polled.meta, plainDiagnostic(job.error) || '服务器未提供错误详情，请检查任务日志。'), { requestId: polled.meta.requestId, jobId, ...(typeof job.errorCode === 'string' && /^[a-z_]{1,80}$/.test(job.errorCode) ? { code: job.errorCode } : {}) });
-      if (!validAnalysis(job.analysis)) throw new AgentJobError(failureMessage('分析任务已结束，但未返回有效分析结果', polled.meta), { ...polled.meta, jobId });
+      const result=contract.result(job,polled.meta,jobId);
       emit({ stage: 'completed', jobId, ...polled.meta });
-      return job.analysis;
+      return result;
     }
   } catch (failure) {
     if (signal.aborted || (failure instanceof Error && failure.name === 'AbortError')) {
@@ -197,4 +200,24 @@ export async function analyzeViaJob(
   } finally {
     signal.removeEventListener('abort', onAbort);
   }
+}
+
+/** Start one detail-analysis job, then poll it. */
+export function analyzeViaJob(config:AgentConfig,requests:HarRequest[],signal:AbortSignal,dependencies:AgentJobDependencies={},context?:AnalysisContext):Promise<Analysis>{
+  return runAgentJob(signal,dependencies,{mode:'detail',payload:()=>({config:{...config},requests,context}),result:(job,meta,jobId)=>{
+    if(!validAnalysis(job.analysis))throw new AgentJobError(failureMessage('分析任务已结束，但未返回有效分析结果',meta),{...meta,jobId});
+    return job.analysis;
+  }});
+}
+
+/** One metadata selection call; an empty selection never triggers a full scan. */
+export function overviewViaJob(config:AgentConfig,requests:HarRequest[],signal:AbortSignal,dependencies:AgentJobDependencies={},goal=''):Promise<OverviewResult>{
+  let knownIds=new Set<string>();
+  return runAgentJob(signal,dependencies,{mode:'overview',payload:()=>{
+    try{const directory=buildOverviewRequests(requests,goal);knownIds=new Set(directory.map(request=>request.id));return {mode:'overview',config:{...config},overview:{goal,requests:directory}};}
+    catch(error){if(error instanceof OverviewInputError)throw new AgentJobError(error.message,{code:error.code});throw error;}
+  },result:(job,meta,jobId)=>{
+    try{return parseOverviewResult(job.overview,knownIds);}
+    catch(error){if(error instanceof OverviewResultError)throw new AgentJobError(failureMessage(error.message,meta),{...meta,jobId,code:error.code});throw error;}
+  }});
 }

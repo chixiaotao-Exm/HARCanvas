@@ -19,3 +19,50 @@
 .analysis-progress .analysis-wait-note {
   color: var(--text);
 }
+
+.analysis-mode {
+  margin-top: 14px;
+}
+
+.analysis-mode p,
+.analysis-coverage {
+  margin: 7px 0 12px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.8;
+}
+
+.overview-indicator {
+  padding: 10px 0 2px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.pending-analysis,
+.explained-analysis {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.explained-analysis {
+  color: var(--success);
+}
+
+.overview-result {
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.overview-result h3 {
+  margin: 6px 0;
+}
+
+.overview-result summary {
+  cursor: pointer;
+  color: var(--accent);
+}

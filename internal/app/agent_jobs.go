@@ -15,7 +15,9 @@ import (
 type AgentJobView struct {
 	ID        string            `json:"id"`
 	Status    string            `json:"status"`
+	Mode      string            `json:"mode,omitempty"`
 	Analysis  *Analysis         `json:"analysis,omitempty"`
+	Overview  *OverviewResult   `json:"overview,omitempty"`
 	Error     string            `json:"error,omitempty"`
 	ErrorCode string            `json:"errorCode,omitempty"`
 	Progress  *AnalysisProgress `json:"progress,omitempty"`
@@ -84,7 +86,7 @@ func (s *agentJobStore) scheduleExpiryLocked() {
 	})
 }
 
-func (s *agentJobStore) create(cancel context.CancelFunc) (AgentJobView, error) {
+func (s *agentJobStore) create(cancel context.CancelFunc, modes ...string) (AgentJobView, error) {
 	var random [18]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return AgentJobView{}, errors.New("无法创建分析任务，请重试。")
@@ -112,6 +114,9 @@ func (s *agentJobStore) create(cancel context.CancelFunc) (AgentJobView, error) 
 		delete(s.items, oldestID)
 	}
 	view := AgentJobView{ID: id, Status: "running", Progress: &AnalysisProgress{Stage: "preparing"}}
+	if len(modes) > 0 {
+		view.Mode = modes[0]
+	}
 	s.items[id] = &agentJob{view: view, createdAt: now, cancel: cancel}
 	s.scheduleExpiryLocked()
 	return view, nil
@@ -179,7 +184,7 @@ func (s *agentJobStore) cancelJob(id string) (AgentJobView, bool) {
 	return view, true
 }
 
-func (s *agentJobStore) finish(id, status string, analysis *Analysis, failure *AnalysisError) AgentJobView {
+func (s *agentJobStore) finish(id, status string, analysis *Analysis, overview *OverviewResult, failure *AnalysisError) AgentJobView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneLocked(s.now())
@@ -190,6 +195,7 @@ func (s *agentJobStore) finish(id, status string, analysis *Analysis, failure *A
 	if job.view.Status == "running" {
 		job.view.Status = status
 		job.view.Analysis = analysis
+		job.view.Overview = overview
 		if failure != nil {
 			job.view.Error = failure.Error()
 			job.view.ErrorCode = failure.Code
@@ -205,12 +211,33 @@ var agentJobID = regexp.MustCompile(`^[A-Za-z0-9_-]{24}$`)
 
 func (s *Server) createAgentJob(w http.ResponseWriter, r *http.Request) {
 	var input struct {
+		Mode     string          `json:"mode"`
 		Config   AgentConfig     `json:"config"`
 		Requests []Request       `json:"requests"`
 		Context  AnalysisContext `json:"context"`
+		Overview *OverviewInput  `json:"overview"`
 	}
 	if !decodeBody(w, r, &input) {
 		return
+	}
+	if input.Mode != "" && input.Mode != "detail" && input.Mode != "overview" {
+		writeError(w, http.StatusBadRequest, "分析模式必须为 detail 或 overview。")
+		return
+	}
+	if input.Mode == "overview" {
+		if input.Overview == nil {
+			writeError(w, http.StatusBadRequest, "全局筛选需要 overview 元数据。")
+			return
+		}
+		clean, _, err := prepareOverview(*input.Overview)
+		if err != nil {
+			failure := publicAnalysisError(err)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": failure.Error(), "errorCode": failure.Code})
+			return
+		}
+		input.Overview = &clean
+		input.Requests = nil
+		input.Context = AnalysisContext{}
 	}
 	select {
 	case s.agentSlots <- struct{}{}:
@@ -219,7 +246,7 @@ func (s *Server) createAgentJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	view, err := s.jobs.create(cancel)
+	view, err := s.jobs.create(cancel, input.Mode)
 	if err != nil {
 		cancel()
 		<-s.agentSlots
@@ -227,8 +254,16 @@ func (s *Server) createAgentJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID := RequestID(r.Context())
-	log.Printf("agent_job event=start request_id=%s job_id=%s requests=%d", requestID, view.ID, len(input.Requests))
-	go s.runAgentJob(ctx, cancel, view.ID, requestID, input.Config, input.Requests, input.Context)
+	requestCount := len(input.Requests)
+	if input.Mode == "overview" {
+		requestCount = len(input.Overview.Requests)
+	}
+	log.Printf("agent_job event=start request_id=%s job_id=%s requests=%d", requestID, view.ID, requestCount)
+	if input.Mode == "overview" {
+		go s.runOverviewAgentJob(ctx, cancel, view.ID, requestID, input.Config, *input.Overview)
+	} else {
+		go s.runAgentJob(ctx, cancel, view.ID, requestID, input.Config, input.Requests, input.Context)
+	}
 	writeJSON(w, http.StatusAccepted, view)
 }
 
@@ -256,26 +291,53 @@ func (s *Server) serveAgentJob(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (s *Server) runAgentJob(ctx context.Context, cancel context.CancelFunc, id, requestID string, config AgentConfig, requests []Request, contexts ...AnalysisContext) {
+	var analysisContext AnalysisContext
+	if len(contexts) > 0 {
+		analysisContext = contexts[0]
+	}
+	s.runAnalysisJob(ctx, cancel, id, requestID, len(requests), func(ctx context.Context, observer AnalysisObserver) (*Analysis, *OverviewResult, error) {
+		result, err := s.Analyzer.AnalyzeWithObserver(ctx, config, requests, analysisContext, observer)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &result, nil, nil
+	})
+}
+
+func (s *Server) runOverviewAgentJob(ctx context.Context, cancel context.CancelFunc, id, requestID string, config AgentConfig, input OverviewInput) {
+	s.runAnalysisJob(ctx, cancel, id, requestID, len(input.Requests), func(ctx context.Context, observer AnalysisObserver) (*Analysis, *OverviewResult, error) {
+		result, err := s.Analyzer.AnalyzeOverview(ctx, config, input, observer)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, &result, nil
+	})
+}
+
+func (s *Server) runAnalysisJob(ctx context.Context, cancel context.CancelFunc, id, requestID string, requestCount int, analyze func(context.Context, AnalysisObserver) (*Analysis, *OverviewResult, error)) {
 	ctx = context.WithValue(ctx, requestIDKey{}, requestID)
 	ctx = context.WithValue(ctx, analysisJobIDKey{}, id)
 	start := time.Now()
 	status, stage := "failed", "analysis"
 	var analysis *Analysis
+	var overview *OverviewResult
 	var failure *AnalysisError
 	defer func() {
 		if recover() != nil {
 			status = "failed"
 			stage = "panic"
 			analysis = nil
+			overview = nil
 			failure = publicAnalysisError(nil)
 		}
 		if ctx.Err() == context.Canceled {
 			status = "cancelled"
 			stage = "cancelled"
 			analysis = nil
+			overview = nil
 			failure = nil
 		}
-		view := s.jobs.finish(id, status, analysis, failure)
+		view := s.jobs.finish(id, status, analysis, overview, failure)
 		<-s.agentSlots
 		cancel()
 		if stage == "analysis" && view.Progress != nil {
@@ -287,18 +349,14 @@ func (s *Server) runAgentJob(ctx context.Context, cancel context.CancelFunc, id,
 		} else if errorCode == "" {
 			errorCode = "none"
 		}
-		log.Printf("agent_job event=finish request_id=%s job_id=%s requests=%d duration_ms=%d status=%s stage=%s error_code=%s", requestID, id, len(requests), time.Since(start).Milliseconds(), view.Status, stage, errorCode)
+		log.Printf("agent_job event=finish request_id=%s job_id=%s requests=%d duration_ms=%d status=%s stage=%s error_code=%s", requestID, id, requestCount, time.Since(start).Milliseconds(), view.Status, stage, errorCode)
 	}()
-	var analysisContext AnalysisContext
-	if len(contexts) > 0 {
-		analysisContext = contexts[0]
-	}
-	result, err := s.Analyzer.AnalyzeWithObserver(ctx, config, requests, analysisContext, func(progress AnalysisProgress) { s.jobs.observe(id, progress) })
+	var err error
+	analysis, overview, err = analyze(ctx, func(progress AnalysisProgress) { s.jobs.observe(id, progress) })
 	if err != nil {
 		failure = publicAnalysisError(err)
 		return
 	}
 	status = "completed"
 	stage = "completed"
-	analysis = &result
 }

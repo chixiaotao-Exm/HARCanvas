@@ -1,4 +1,4 @@
-import type { AgentConfig, Analysis, HarRequest } from './types';
+import type { AgentConfig, Analysis, HarRequest, Suggestion } from './types';
 import { buildAnalysisContext, planAnalysisContextForBatch } from './analysisContext.ts';
 import type { AnalysisContext } from './analysisContext.ts';
 
@@ -65,6 +65,8 @@ type BatchOptions = {
   config: AgentConfig;
   signal: AbortSignal;
   goal?: string;
+  contextRequests?: HarRequest[];
+  previous?: Suggestion[];
   analyzeBatch: (config: AgentConfig, requests: HarRequest[], signal: AbortSignal, context?:AnalysisContext) => Promise<Analysis>;
   onProgress?: (progress: AnalysisProgress, analysis: Analysis) => void;
 };
@@ -72,7 +74,7 @@ type BatchOptions = {
 export async function analyzeInBatches(options: BatchOptions) {
   const { batches, warnings } = planAnalysisBatches(options.requests);
   const config = { ...options.config };
-  const globalContext = buildAnalysisContext(options.requests, options.goal);
+  const globalContext = buildAnalysisContext(options.contextRequests ?? options.requests, options.goal, options.previous);
   const contextWarning='全局辅助目录、字段关系或历史建议已按本批范围及大小预算裁剪；本批请求单独列入预览分析，原始 HAR 和画布数据保持完整。';
   if(globalContext.truncated)warnings.push(contextWarning);
   const suggestions = new Map<string, Analysis['suggestions'][number]>();
@@ -91,7 +93,7 @@ export async function analyzeInBatches(options: BatchOptions) {
     const progress = { batch: i + 1, totalBatches: batches.length, completedRequests, totalRequests: options.requests.length, batchRequests:batches[i].length, batchStartedAt:Date.now() };
     options.onProgress?.(progress, snapshot());
     try {
-      const context=planAnalysisContextForBatch(globalContext,batches[i],[...suggestions.values()]);
+      const context=planAnalysisContextForBatch(globalContext,batches[i],[...(options.previous ?? []),...suggestions.values()]);
       if(context.truncated&&!warnings.includes(contextWarning))warnings.push(contextWarning);
       const result = await options.analyzeBatch(config, batches[i], options.signal, context);
       if (options.signal.aborted) { status = 'cancelled'; break; }

@@ -111,5 +111,10 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
   for(const suggestion of suggestions) for(const dependency of suggestion.dependencies??[]) {
     if(!relationList.some(r=>r.sourceRequestId===dependency&&r.targetRequestId===suggestion.requestId))pending.push(`${suggestion.label}：与 ${dependency} 的关系待确认，尚未自动连线。`);
   }
+  // Append-only generation cannot retrofit a user's existing bindings. Keep
+  // those recorded-source warnings visible on later batches and supplements.
+  for(const node of nextNodes) for(const warning of node.data.uncertainty?.split('\n')??[]) {
+    if(warning.includes('的来源或编码暂不能自动绑定'))pending.push(`${node.data.label}：${warning}`);
+  }
   return {nodes:nextNodes,edges:nextEdges,addedCount,pending:[...new Set(pending)]};
 }

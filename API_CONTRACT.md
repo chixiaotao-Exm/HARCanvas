@@ -118,6 +118,38 @@ The frontend sends a first batch of at most 4 requests, then sequential batches 
 
 `label` is a short Chinese business name. Required, nonblank Chinese `description` explains the request's purpose, input provenance, output and uncertainty; missing descriptions fail analysis rather than receiving a generic fallback. The prompt requests concise descriptions, summaries and evidence lists to reduce generation time; these are guidance rather than a claim of provider-enforced token limits. Suggestion request IDs must belong to the submitted batch; dependency IDs may refer to the bounded related catalog or history. Credential values must not be repeated in explanations. Suggested connections remain editable, and uncertain relations do not become executable connections automatically.
 
+### Main-flow overview jobs
+
+The default workbench mode first selects a bounded set of main-flow candidates, then deeply analyses only those original records using the detail API above. At most four pending records skip the extra selection call. A user can choose full per-record analysis or click a pending record for supplemental detail. Valid explanations already completed in the same session are reused; successful previous results survive cancellation and supplementation.
+
+`POST /api/agent/jobs` also accepts an overview task:
+
+```ts
+type OverviewInput = {
+  mode: 'overview';
+  config: {baseUrl:string;apiKey:string;model:string};
+  overview: {
+    goal:string;
+    requests:{id:string;method:string;domain:string;path:string;category:string;
+      status:number;mimeType:string;pageId?:string;startedAt?:string}[];
+  };
+};
+type OverviewResult = {
+  summary:string;
+  selectedRequestIds:string[];
+  reasons:{requestId:string;reason:string}[];
+  warnings:string[];
+};
+```
+
+Creation and status responses contain `mode:'overview'`; a completed status contains `overview:OverviewResult` and no `analysis`. Overview tasks share the existing two slots, cancellation, stage progress and retention. Missing mode or `mode:'detail'` retains existing detail behavior; the synchronous endpoint remains unchanged.
+
+The backend reconstructs the metadata whitelist. No request URL, query values, headers or bodies are sent for overview. Inputs are limited to 1–1000 records and 512 KiB for the encoded `{goal,requests}` object; goal is at most 16000 UTF-8 bytes. IDs use the existing 1–128 character identifier syntax. Other field limits in UTF-8 bytes are method 32, domain 512, path 4096, category 100, MIME type 256, page ID 200 and timestamp 100. Oversized inputs fail explicitly before a model call, without truncating IDs or dropping records.
+
+Selection targets approximately 8–16 requests, with a hard maximum of 24. Selected IDs must be known and unique; reasons must cover exactly those IDs once each. Empty selections are valid and do not trigger automatic full analysis. Summary is nonblank and at most 2000 bytes, each reason nonblank and at most 600 bytes, warnings at most 12 with 1000 bytes each. Provider responses are capped at 128 KiB. Invalid inputs use `invalid_overview`; invalid output uses `provider_analysis_invalid`.
+
+Overview is only a metadata-based hypothesis. It never supplies purpose suggestions, creates blocks, propagates an explanation to same-URL records, or proves flow completeness. Unselected records remain pending. Detail preserves original capture order and receives scoped context from the broader capture. Generation checks recorded field evidence against the complete capture, so omitted sources remain pending and cannot silently make a consumer ready. Supplemental analysis preserves existing user edits and does not retrofit bindings into existing nodes; users review those bindings in the parameter inspector.
+
 ## Flow model and preflight
 
 ```ts

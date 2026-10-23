@@ -25,6 +25,20 @@ test('unknown purposes and speculative relationships never become executable edg
  assert.equal(mergeGeneratedFlow([],[],[req('a')],[suggestion('a',{description:' '})],'capture').nodes.length,0);
 });
 
+test('an omitted recorded source leaves a consumer pending across batches and later supplemental analysis',()=>{
+ const requests=[req('source',{responseBody:'{"ticket":"unique-source-9021"}'}),req('target',{body:'{"ticket":"unique-source-9021"}'})];
+ const first=mergeGeneratedFlow([],[],requests,[suggestion('target',{readiness:'ready'})],'capture');
+ assert.deepEqual(first.nodes.map(n=>n.data.requestId),['target']);
+ assert.equal(first.nodes[0].data.readiness,'missing-input');
+ assert.ok(first.pending.some(w=>w.includes('source.body.ticket')));
+ const unchanged=mergeGeneratedFlow(first.nodes,first.edges,requests,[suggestion('target')],'capture');
+ assert.ok(unchanged.pending.some(w=>w.includes('source.body.ticket')));
+ const supplemented=mergeGeneratedFlow(unchanged.nodes,unchanged.edges,requests,[suggestion('source'),suggestion('target')],'capture');
+ assert.equal(supplemented.nodes.length,2);
+ assert.equal(supplemented.nodes[0].data,first.nodes[0].data,'existing consumer bindings remain owned by the user');
+ assert.ok(supplemented.pending.some(w=>w.includes('source.body.ticket')));
+});
+
 test('different captures cannot deduplicate or connect through identical request IDs',()=>{
  const old=mergeGeneratedFlow([],[],[req('a')],[suggestion('a')],'old');
  const next=mergeGeneratedFlow(old.nodes,[],[req('a'),req('b')],[suggestion('a'),suggestion('b')],'new');
