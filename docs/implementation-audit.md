@@ -2,6 +2,21 @@
 
 This audit covers the implementation against `docs/product-plan.md`. The review agent used synthetic fixtures, inspected no real HAR or user credentials, and replayed no external target. Root's browser acceptance is recorded below; deployment verification is recorded separately after publication.
 
+## Agent repair backend and client protocol — 2026-10-23
+
+The repair implementation adds a third asynchronous Agent mode with an independent `repair` result. It shares the existing guarded provider transport, progress observer, concurrency slots, cancellation and retention. The value-free input catalog carries only node explanations, short issue codes, existing string-field locations and opaque source capabilities; unknown incoming value/body/header/URL properties are dropped during reconstruction. Model results reject unknown properties and cannot change readiness, overwrite existing bindings, select an unknown field/source, attach drafts to unsupported nodes, or omit explanations for nonready nodes.
+
+Backend verification completed locally:
+
+- `go test ./... -count=1 -timeout 60s`: passed after repair integration and prompt refinement; all earlier detail/overview/runtime tests remain passing.
+- `go vet ./...`: passed.
+- New `agent_repair_test.go` tests cover a synthetic 16-node catalog in one compatible provider call; omitted field values and answers; field/source/path/count/UTF-8 limits; an exact 512 KiB catalog boundary; separate result/progress types; question reuse; binding-mode correspondences; existing-binding protection; unsupported-note coverage; unsafe question IDs; strict unknown-patch and required-boolean parsing; controlled provider errors; the 256 KiB response limit; actual response-reading timeout; create-request disconnection; real provider cancellation; shared-slot retention and suppression of late results.
+- `node --test web/test/agentRepair.test.mjs`: 9/9 passed. These checks cover immutable submitted catalog/configuration, refusing capabilities added after submission, exact repair mode on POST and polling, rejecting free-form patches or detail/overview results, live and late-create cancellation with independent DELETE, pre-cancel/server-cancel behavior, no retries after lost submission/poll/terminal failure, and numeric-only progress diagnostics.
+
+These tests use synthetic local/mock providers. They do not execute any real HAR, registration, MFA or browser-verification workflow and do not establish business success. The catalog builder owns ancestry/exact-recorded-value provenance because the backend DTO deliberately contains no graph or field values. Root browser acceptance used the final built interface through the in-app browser and an isolated local synthetic provider. Native canvas fullscreen entered successfully; the edge context menu remained visible inside it, and opening run preparation exited fullscreen. The repair form showed two ordinary input fields, four binding previews (two local answers, one exact-ancestor source and one runtime manual input), and separate browser-only guidance. Applying drafts retained all original preparation states; explicit per-step confirmation cleared only the two supported steps, leaving the unsupported step blocked. Check-only returned both blocked and valid results without any execution job submission. Deleting a synthetic node invalidated the old plan, and active model cancellation displayed a stopped message without graph modification. No real captured requests or real provider calls were made.
+
+The final full frontend suite passed 165/165; the 24 catalog/component regressions were rerun after the final label changes. Production TypeScript/Vite build and Go suite passed. The existing main-chunk-size advisory remains. The user's actual project was read locally for aggregate compatibility only: 16 nodes, 15 readiness conditions, 134 supported string-field locations and zero reliable automatic source capabilities. This confirms a supported catalog can be built; it does not claim all conditions can be repaired automatically.
+
 ## Verified
 
 - `web/src/agentJobs.ts` starts each model task once, snapshots optional analysis context, and never retries POST. A terminal model failure no longer reports the successful poll's HTTP 200 as its error status.

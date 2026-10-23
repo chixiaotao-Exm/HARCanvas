@@ -1,6 +1,7 @@
 import type { AgentConfig, Analysis, HarRequest } from './types';
 import type { AnalysisContext } from './analysisContext';
 import {buildOverviewRequests,parseOverviewResult,OverviewInputError,OverviewResultError,type OverviewResult} from './overview.ts';
+import {parseRepairPlan,type RepairInput,type RepairPlan} from './repair.ts';
 export type {OverviewRequest,OverviewReason,OverviewResult} from './overview.ts';
 
 export const AGENT_JOB_POLL_MS = 1000;
@@ -27,7 +28,7 @@ export type AgentJobDependencies = {
   onProgress?: (progress: AgentJobProgress) => void;
 };
 type ResponseMeta = { status: number; requestId?: string };
-type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; mode?: unknown; analysis?: unknown; overview?:unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
+type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; mode?: unknown; analysis?: unknown; overview?:unknown; repair?:unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
 
 export class AgentJobError extends Error {
   status?: number;
@@ -87,7 +88,7 @@ function jobFailureMessage(meta: ResponseMeta, detail: string) {
 async function runAgentJob<T>(
   signal: AbortSignal,
   dependencies: AgentJobDependencies,
-  contract:{mode:'detail'|'overview';payload:()=>unknown;result:(job:JobResponse,meta:ResponseMeta,jobId:string)=>T},
+  contract:{mode:'detail'|'overview'|'repair';payload:()=>unknown;result:(job:JobResponse,meta:ResponseMeta,jobId:string)=>T},
 ): Promise<T> {
   const fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
   const sleep = dependencies.sleep ?? sleepForAgentJob;
@@ -154,7 +155,7 @@ async function runAgentJob<T>(
     // Retain a known identity even if the rest of the start response is invalid,
     // so a possibly accepted task can still be cancelled without resubmitting.
     if (record(submitted.body) && typeof submitted.body.id === 'string' && submitted.body.id.trim()) jobId = submitted.body.id;
-    const modeMatches=(mode:unknown)=>contract.mode==='overview'?mode==='overview':mode===undefined||mode===''||mode==='detail';
+    const modeMatches=(mode:unknown)=>contract.mode==='detail'?mode===undefined||mode===''||mode==='detail':mode===contract.mode;
     if (!record(submitted.body) || typeof submitted.body.id !== 'string' || !submitted.body.id.trim() || submitted.body.status !== 'running' || submitted.meta.status !== 202 || !modeMatches(submitted.body.mode)) {
       throw new AgentJobError(failureMessage('启动分析任务的响应格式不正确', submitted.meta), { ...submitted.meta, jobId });
     }
@@ -219,5 +220,14 @@ export function overviewViaJob(config:AgentConfig,requests:HarRequest[],signal:A
   },result:(job,meta,jobId)=>{
     try{return parseOverviewResult(job.overview,knownIds);}
     catch(error){if(error instanceof OverviewResultError)throw new AgentJobError(failureMessage(error.message,meta),{...meta,jobId,code:error.code});throw error;}
+  }});
+}
+
+/** A constrained repair plan; entered answers never enter this transport. */
+export function repairViaJob(config:AgentConfig,input:RepairInput,signal:AbortSignal,dependencies:AgentJobDependencies={}):Promise<RepairPlan>{
+  const submitted=structuredClone(input);
+  return runAgentJob(signal,dependencies,{mode:'repair',payload:()=>({mode:'repair',config:{...config},repair:submitted}),result:(job,meta,jobId)=>{
+    try{return parseRepairPlan(job.repair,submitted);}
+    catch{throw new AgentJobError(failureMessage('修补结果不符合当前画布的可用字段，请重新检查',meta),{...meta,jobId,code:'invalid_repair_result'});}
   }});
 }

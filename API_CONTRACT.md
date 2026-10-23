@@ -76,7 +76,7 @@ Request IDs are stable within a parsed capture (`req-1`, etc.), not globally uni
 
 ## Agent analysis
 
-Both analysis creation endpoints accept:
+The synchronous endpoint and default/detail asynchronous mode accept:
 
 ```ts
 type AnalyzeInput = {
@@ -102,21 +102,34 @@ type Suggestion = {
 ```
 
 - `POST /api/agent/analyze` → synchronous `Analysis`; analysis failure returns 502 `{error,errorCode}`.
-- `POST /api/agent/jobs` → 202 `{id,status:"running",progress?}`.
-- `GET /api/agent/jobs/{id}` → `{id,status,analysis?,error?,errorCode?,progress?}`, status `running|completed|failed|cancelled`.
+- `POST /api/agent/jobs` accepts detail input above (optional `mode:'detail'`), or the overview/repair envelopes below, and returns 202 `{id,status:"running",mode?,progress?}`.
+- `GET /api/agent/jobs/{id}` returns the matching result type:
+
+  ```ts
+  type AgentJobView = {
+    id:string;status:'running'|'completed'|'failed'|'cancelled';
+    mode?:'detail'|'overview'|'repair'; // absent/empty mode remains legacy detail
+    analysis?:Analysis;overview?:OverviewResult;repair?:RepairPlan;
+    error?:string;errorCode?:string;
+    progress?:{stage:'preparing'|'waiting_model'|'reading_response'|'validating'|'completed';
+      elapsedMs:number;payloadBytes?:number;contextBytes?:number;responseBytes?:number};
+  };
+  ```
+
+  Completed detail jobs contain `analysis`, overview jobs contain `overview`, and repair jobs contain `repair`; the other result fields are absent. Overview/repair creation and polling require their exact mode. Unknown modes return 400.
 - `DELETE /api/agent/jobs/{id}` → the current terminal state or `cancelled`; cancellation wins over late provider results.
 
-The configured base URL must end with `/v1`; the backend appends `/chat/completions`. Model/key/URL are required; failures are explicit and never replaced by fake analysis. Each task permits 1–300 requests, a 4 MiB selected-request payload, and a 4 MiB provider response. Analysis context is bounded to 512 KiB, goal to 16,000 bytes, catalog to 1,000 entries, previous suggestions to 300 and relations to 300. The provider call has a 180-second total and response-header timeout by default (`NewAnalyzerWithTimeout` configures it for embedding/tests).
+The configured base URL must end with `/v1`; the backend appends `/chat/completions`. Model/key/URL are required; failures are explicit and never replaced by fake analysis. Each detail task permits 1–300 requests, a 4 MiB selected-request payload, and a 4 MiB provider response. Analysis context is bounded to 512 KiB, goal to 16,000 bytes, catalog to 1,000 entries, previous suggestions to 300 and relations to 300. The provider call has a 180-second total and response-header timeout by default (`NewAnalyzerWithTimeout` configures it for embedding/tests).
 
-Analysis failure `errorCode` is application-defined: `invalid_config`, `invalid_requests`, `invalid_context`, `analysis_limit`, `endpoint_unavailable`, `provider_unavailable`, `provider_response_failed`, `provider_http_error`, `provider_response_invalid`, `provider_analysis_invalid`, `timeout`, `cancelled`, or `internal_error`. Sync errors and async job errors contain controlled diagnostic text; provider bodies, provider-controlled IDs/dependencies, JSON parser details, and raw transport errors are never copied into errors. HTTP status and the configured timeout may be included.
+Analysis failure `errorCode` is application-defined: `invalid_config`, `invalid_requests`, `invalid_context`, `invalid_overview`, `invalid_repair`, `analysis_limit`, `endpoint_unavailable`, `provider_unavailable`, `provider_response_failed`, `provider_http_error`, `provider_response_invalid`, `provider_analysis_invalid`, `timeout`, `cancelled`, or `internal_error`. Sync errors and async job errors contain controlled diagnostic text; provider bodies, provider-controlled IDs/dependencies, JSON parser details, and raw transport errors are never copied into errors. HTTP status and the configured timeout may be included.
 
-Two shared analysis slots cover synchronous and asynchronous calls. A cancelled task retains its slot until its worker actually exits. Terminal analysis records last 15 minutes, at most 128 records; eviction prefers terminal records. Active task state is process-local and is lost on restart.
+Two shared analysis slots cover synchronous calls and all detail, overview and repair jobs. A cancelled task retains its slot until its worker actually exits. Terminal analysis records last 15 minutes, at most 128 records; eviction prefers terminal records. Active task state is process-local and is lost on restart. The job store retains bounded results and progress, not provider configuration or submitted request/catalog data.
 
 Job `progress` contains `{stage,elapsedMs,payloadBytes?,contextBytes?,responseBytes?}`. Its fixed stages are `preparing`, `waiting_model`, `reading_response`, `validating`, and `completed`; they advance only with actual model-call activity. Polling reports live elapsed time, and failures retain the last observed stage. No incomplete model JSON becomes an analyzed request or canvas node. Stage logs record correlation/job IDs, byte counts, elapsed time and controlled error codes without model settings, endpoints or HAR values.
 
 The frontend sends a first batch of at most 4 requests, then sequential batches of at most 12 requests and 96 KiB of request JSON, with UTF-8-safe 4,096-byte body previews. The source capture and canvas requests remain unchanged. Each batch receives at most 32 KiB of related context, including the goal, current request catalog, supported field relations with their source records, relevant history and limited nearby metadata. This replaces repeatedly sending the entire global catalog. Omitted auxiliary context and shortened previews are disclosed as analysis limitations; identifiers and field paths are never shortened into different evidence. No request is discarded or deduplicated by URL. A failed or cancelled batch stops later batches and preserves completed suggestions. Imports discard stale results. There is no automatic provider retry.
 
-`label` is a short Chinese business name. Required, nonblank Chinese `description` explains the request's purpose, input provenance, output and uncertainty; missing descriptions fail analysis rather than receiving a generic fallback. The prompt requests concise descriptions, summaries and evidence lists to reduce generation time; these are guidance rather than a claim of provider-enforced token limits. Suggestion request IDs must belong to the submitted batch; dependency IDs may refer to the bounded related catalog or history. Credential values must not be repeated in explanations. Suggested connections remain editable, and uncertain relations do not become executable connections automatically.
+`label` is a short Chinese business name. Required, nonblank Chinese `description` explains the request's purpose, input provenance, output and uncertainty; missing descriptions fail analysis rather than receiving a generic fallback. The prompt requests descriptions of approximately 60–100 Chinese characters, at most two evidence items and three necessary variables; these are guidance rather than a claim of provider-enforced token limits. Suggestion request IDs must belong to the submitted batch; dependency IDs may refer to the bounded related catalog or history. Credential values must not be repeated in explanations. Suggested connections remain editable, and uncertain relations do not become executable connections automatically.
 
 ### Main-flow overview jobs
 
@@ -149,6 +162,62 @@ The backend reconstructs the metadata whitelist. No request URL, query values, h
 Selection targets approximately 8–16 requests, with a hard maximum of 24. Selected IDs must be known and unique; reasons must cover exactly those IDs once each. Empty selections are valid and do not trigger automatic full analysis. Summary is nonblank and at most 2000 bytes, each reason nonblank and at most 600 bytes, warnings at most 12 with 1000 bytes each. Provider responses are capped at 128 KiB. Invalid inputs use `invalid_overview`; invalid output uses `provider_analysis_invalid`.
 
 Overview is only a metadata-based hypothesis. It never supplies purpose suggestions, creates blocks, propagates an explanation to same-URL records, or proves flow completeness. Unselected records remain pending. Detail preserves original capture order and receives scoped context from the broader capture. Generation checks recorded field evidence against the complete capture, so omitted sources remain pending and cannot silently make a consumer ready. Supplemental analysis preserves existing user edits and does not retrofit bindings into existing nodes; users review those bindings in the parameter inspector.
+
+### Agent repair jobs
+
+Repair is a separate planning action for an existing canvas. It returns questions, binding drafts and per-node explanations; it does not execute requests or change readiness. The frontend constructs an opaque capability catalog from the current graph and original recorded evidence. No field values, answers, full URL, request/response body or header map are part of this DTO.
+
+```ts
+type RepairInput = {
+  goal:string;
+  nodes:{
+    id:string;label:string;
+    kind:'input'|'request'|'extract'|'condition'|'assertion'|'manual'|'output';
+    readiness:'ready'|'missing-input'|'manual'|'unsupported';
+    description:string;uncertainty:string;issues:string[];
+    fields:{id:string;target:'body'|'header'|'query';path:string;
+      valueType:'string';existingBinding:boolean}[];
+    sources:{id:string;fieldId:string;sourceNodeId:string;sourcePath:string;evidence:string}[];
+  }[];
+};
+type RepairPlan = {
+  summary:string;
+  questions:{id:string;title:string;help:string;placeholder:string;required:boolean}[];
+  bindings:{nodeId:string;fieldId:string;mode:'user'|'manual'|'upstream';
+    questionId?:string;sourceId?:string;reason:string}[];
+  notes:{nodeId:string;title:string;message:string;kind:'manual'|'unsupported'|'review'}[];
+  warnings:string[];
+};
+// POST /api/agent/jobs
+type RepairJobInput = {
+  mode:'repair';config:{baseUrl:string;apiKey:string;model:string};repair:RepairInput;
+};
+```
+
+Creation and status responses contain `mode:'repair'`. Successful completion contains `repair:RepairPlan` and no detail/overview result. Repair reuses the same guarded compatible provider call, real stage observer, cancellation, two shared slots and terminal retention. Invalid catalog input returns 400 before a slot/provider call, using `invalid_repair`; invalid model output fails the job with `provider_analysis_invalid`. The backend reconstructs the catalog whitelist and strictly rejects unknown model result properties, including free-form patches and readiness changes. Provider JSON is bounded to 256 KiB; it must provide all result arrays and a real boolean `required` for each question.
+
+| Repair input limit | Maximum |
+| --- | --- |
+| Nodes / encoded `{goal,nodes}` | 100 / 512 KiB |
+| Goal | 16000 UTF-8 bytes |
+| Fields / sources per node | 80 / 80 |
+| Node, field, source and question IDs | `[A-Za-z0-9_-]{1,128}` |
+| Field path / source path | 1024 UTF-8 bytes each |
+| Label / description / uncertainty | 400 / 4000 / 4000 UTF-8 bytes |
+| Issue codes | 30 per node, `[A-Za-z0-9_.:-]{1,100}` each |
+| Source evidence | 1000 UTF-8 bytes |
+
+Node IDs are globally unique; field/source IDs are unique within their target node. Fields belong only to request nodes and are existing writable string leaves: safe JSON dot paths, single query values or allowed existing headers. Whole URL/body replacement, object/null/numeric/boolean dynamic replacement, repeated query values and transport/system headers are excluded. Unsafe/prototype paths, duplicate targets and case-insensitive duplicate header names are rejected. Source capabilities must reference a known different request node and a specific local target field, using `body.*` or an addressable `headers.*` path. The frontend admits sources only after checking real graph ancestry and exact recorded string equality; the backend enforces the submitted capability whitelist. The DTO has no graph or recorded values, so it cannot independently establish those two provenance facts. Applying a plan rebuilds the current catalog and checks the unchanged canvas snapshot again.
+
+Output limits are 32 questions, 100 bindings, 100 notes and 12 warnings. Summary is nonblank and at most 2000 UTF-8 bytes; each question/note title is nonblank and at most 200 bytes; question help is at most 1000 and placeholder at most 300; binding reason is nonblank and at most 1000; note message is nonblank and at most 2000; each warning is at most 1000. The question IDs `__proto__`, `prototype` and `constructor` are rejected. Prioritize a few understandable business fields: the question cap is not a target count, and unknown tracking/session/signature requirements remain explanatory notes.
+
+Each binding must target a known `(nodeId,fieldId)` exactly once and cannot replace `existingBinding:true`. `user` requires a known `questionId` and no source; `manual` has neither question nor source; `upstream` requires a known source capability for that exact target field and no question. Questions may be reused across nodes, but every question must be referenced by a user binding. Every nonready node needs a note; an `unsupported` node needs an `unsupported` note and cannot receive any binding draft. No model result may supply a URL, whole body/header replacement, generator, transformation, executable code or readiness patch.
+
+Question answers remain in frontend memory and, on explicit Apply, become the local runtime `values` used by the binding compiler. They are not sent in a repair request, saved to model settings, stored automatically, or included in project export; reopening a project requires reentry. A subsequent explicitly started execution sends the necessary runtime inputs to the flow server and intended target as usual. Application adds binding configuration without rewriting the original captured values or automatically clearing readiness. A user may explicitly confirm an eligible supported step only after applying/reviewing its bindings; manual steps require manual-input configuration. `unsupported` remains blocked. Recheck is validation only and never starts a flow. Actual execution requires a separate Run action and successful preflight.
+
+### Canvas fullscreen and preparation UI
+
+The canvas toolbar uses the browser Fullscreen API for its canvas surface, with Enter/Exit controls, Esc support and visible unsupported/permission errors. It changes presentation only, with no API call or modification of graph/run data. Opening Run preparation or Repair first exits canvas fullscreen so the relevant panel is visible. Preparation groups user inputs, manual handling, unsupported capabilities and structural problems; a count of `REVIEW_REQUIRED`/`UNSUPPORTED_STEP` issues is not a promise of that many editable text fields. Fullscreen and repair browser acceptance are separate from backend contract tests.
 
 ## Flow model and preflight
 
