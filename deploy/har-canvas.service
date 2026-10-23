@@ -1,0 +1,29 @@
+[Unit]
+Description=HAR Canvas
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/data/workspace/har-canvas
+
+[Service]
+Type=simple
+User=harcanvas
+Group=harcanvas
+WorkingDirectory=/data/workspace/har-canvas/current
+EnvironmentFile=/data/workspace/har-canvas/shared/service.env
+ExecStart=/data/workspace/har-canvas/current/har-canvas -require-auth -addr 127.0.0.1:8090 -web /data/workspace/har-canvas/current/web/dist -sample-har /data/workspace/har-canvas/shared/re.har
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

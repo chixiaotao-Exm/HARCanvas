@@ -44,7 +44,21 @@ docker build -t har-canvas .
 docker run --rm -p 127.0.0.1:8090:8090 har-canvas
 ```
 
-当前版本按单用户本地原型设计。对外发布时应先加访问控制；这是一个可以发出网络请求、显示 HAR 和模型凭据的工作台。上传 HAR 不会自动触发请求，也不会写入服务器磁盘；模型分析仅在点击分析时发出，所选请求会发送到用户配置的模型服务。
+可通过环境变量启用内置 HTTP BasicAuth。`HAR_CANVAS_USER` 和 `HAR_CANVAS_PASSWORD` 必须同时配置，只配置其中一个会启动失败；两者均未配置时维持本地无认证模式。认证覆盖网页、静态资源、健康检查、API 和默认 HAR 样例，浏览器首次访问时会提示输入账号密码。
+
+```powershell
+$env:HAR_CANVAS_USER = "your-user"
+$env:HAR_CANVAS_PASSWORD = "your-password"
+go run ./cmd/server -require-auth -addr 127.0.0.1:8090 -web web/dist
+```
+
+公网服务应启用 `-require-auth`：当任一凭据为空或环境文件未提供有效值时，服务直接拒绝启动，避免误以无认证模式运行。本地不传该标志时仍保留上述可选认证行为。
+
+Docker 可使用 `--env-file` 提供这两个变量。对外发布时使用平台提供的 HTTPS 入口，或由 HTTPS 终止服务转发到应用端口；BasicAuth 不加密 HTTP 连接中的凭据，不应通过公网明文 HTTP 使用。后端端口应只允许可信入口访问。
+
+当前版本按单用户工作台设计，可以发出网络请求、显示 HAR 和模型凭据。上传 HAR 不会自动触发请求，也不会写入服务器磁盘；模型分析仅在点击分析时发出，所选请求会发送到用户配置的模型服务。
+
+Instabox 的持久目录、systemd 安装与端口发布步骤见 [部署说明](deploy/README.md)。公网验收可设置 `HAR_CANVAS_URL` 后运行 `node scripts/verify-deployment.mjs`；认证读取忽略的 `.deployment/service.env`，可用 `HAR_CANVAS_ENV_FILE` 指定其他文件。额外设置 `HAR_CANVAS_VERIFY_EXAMPLE=1` 可验证默认测试包和完整响应读取，不会回放抓包请求。
 
 ## 运行约束
 

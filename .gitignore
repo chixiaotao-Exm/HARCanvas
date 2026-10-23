@@ -4,7 +4,9 @@ web/dist/
 *.log
 .env
 .env.*
+*.env
 !.env.example
 test-results/
 *.har
 *.tsbuildinfo
+.deployment/
