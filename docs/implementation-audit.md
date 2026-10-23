@@ -75,3 +75,15 @@ The UI owner corrected lost wrapper measurements and added two regressions; the 
 The runtime smoke script is intentionally self-contained. It creates temporary files under ignored `test-results/`, injects DNS/dial behavior only in its test harness, leaves the production NetworkGuard unchanged, and removes its own process and files on exit.
 
 A separate ignored `.deployment/ui-harness/` fixture serves the built UI at local port 8094, a compatible synthetic model at port 38997, and a three-request synthetic HAR with two evidence-backed dependencies. Every synthetic target waits four seconds; a path containing `fail` returns HTTP 503. Its runner accepts only `ui-harness.invalid` and uses an in-process response transport, so these browser checks cannot send captured requests to an external site. This harness is for local UI acceptance, not deployment.
+
+## Deployment acceptance
+
+Published code revision: `fe71c478bd928367b5c6fbd24139e36a570b0f31`, release `20261023-workbench-fe71c47`. The existing anonymous service remains at `https://8090-agqwo5jhubwytra2xmcahzr6qu.instabox.tech/`. GitHub main received the implementation; the previous release remains available for rollback.
+
+- Linux/amd64 production binary built successfully. Upload SHA-256 verified before installation; public and installed JS/CSS hashes match the local production build. systemd is active and both internal and anonymous public health return 200.
+- The actual public UI opens in light mode with zero records/nodes. A browser-run practice reaches manual pause, resumes and completes all four nodes, and returns the expected full output. Refreshing restores the empty workspace.
+- A loopback-only synthetic provider on the deployed machine delayed its response for 22 seconds. The public asynchronous analysis completed in 24,922 ms with exactly one provider call. A separate public API test verified manual pause/resume within the same job and 14 ordered execution events, without replaying its initial step.
+- The public test imported only a synthetic three-request HAR. No registration or real captured request was replayed. The available local/public browser origins contain no complete saved model configuration; a real provider call was therefore not claimed. Model compatibility was tested using controlled compatible endpoints.
+- The owned temporary provider and remote upload staging directory (including its temporary environment copy) were removed after verification. Production data and earlier releases were retained.
+
+Remaining product limits are documented in README: HTTP workflows do not reproduce browser scripting, CAPTCHA or arbitrary dynamic signatures; numeric/boolean dynamic field bindings require explicit supported alternatives. Windows race instrumentation and Docker execution were not tested. The production build's only advisory is its JavaScript chunk size.
