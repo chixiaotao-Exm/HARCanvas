@@ -31,7 +31,7 @@ export function readinessIssues(nodes:FlowNode[]):PreflightIssue[]{
   return nodes.filter(node=>node.data.kind==='request'&&node.data.readiness&&node.data.readiness!=='ready').map(node=>({
     nodeId:node.id,field:'readiness',code:node.data.readiness==='unsupported'?'UNSUPPORTED_STEP':'REVIEW_REQUIRED',
     message:node.data.readiness==='unsupported'?`「${node.data.label}」需要浏览器能力，当前执行器还不能完成。`:node.data.readiness==='manual'?`「${node.data.label}」需要安排本次运行的人工输入。`:`「${node.data.label}」还需要补充或核对本次使用的资料。`,
-    suggestedAction:node.data.readiness==='unsupported'?'查看修补助手的说明，在网页中处理，或调整流程。':node.data.readiness==='manual'?'让 Agent 找到需要人工填写的字段，执行到这一步时在页面内输入。':'打开修补助手，用表单补充资料，再逐步确认。',
+    suggestedAction:node.data.readiness==='unsupported'?'查看修补助手的说明，在网页中处理，或调整流程。':node.data.readiness==='manual'?'让 Agent 找到需要人工填写的字段，执行到这一步时在页面内输入。':node.data.bindings?.some(binding=>binding.mode==='user')?'在方块内填写本次资料，核对其余参数后标记就绪；不清楚的部分可使用修补助手。':'打开修补助手，用表单补充资料，再逐步确认。',
   }));
 }
 

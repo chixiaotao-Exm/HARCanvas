@@ -1,0 +1,16 @@
+.node-inputs{margin-top:12px;padding-top:11px;border-top:1px solid var(--border);cursor:default}
+.node-input-heading{font-size:9px;color:var(--muted);margin-bottom:9px}
+.node-input-field{display:block;margin-top:9px;min-width:0}
+.node-input-field>span{display:flex;align-items:baseline;justify-content:space-between;gap:8px;color:var(--text);font-size:10px;line-height:1.6;margin-bottom:5px;overflow-wrap:anywhere}
+.node-input-field small{flex-shrink:0;font-size:8px;font-weight:400;color:var(--muted)}
+.node-input-field>input{display:block;width:100%;min-width:0;font-size:11px;line-height:1.65;padding:8px 9px;border:1px solid var(--border);border-radius:5px;background:var(--canvas);color:var(--text);cursor:text}
+.node-input-field>input:focus{border-color:var(--accent);outline:2px solid var(--accent-soft);outline-offset:1px}
+.node-input-field>input::placeholder{color:var(--muted);opacity:.8}
+.node-input-field>input:disabled{opacity:.65;cursor:default}
+.node-input-more{font-size:9px;line-height:1.8;color:var(--muted);margin-top:9px}
+.node-input-more>button,.node-configure-inputs{color:var(--accent);font-size:9px;text-decoration:underline;text-underline-offset:3px}
+.node-configure-inputs{display:block;margin-top:8px}
+.node-input-more>button:disabled,.node-configure-inputs:disabled{opacity:.6;cursor:default}
+.node-confirm-inputs{display:block;width:100%;margin-top:9px;padding:7px 8px;border:1px solid color-mix(in srgb,var(--accent) 24%,var(--border));border-radius:5px;background:var(--accent-soft);color:var(--accent);font-size:9px;line-height:1.6;text-align:left}
+.node-confirm-inputs:enabled:hover{border-color:var(--accent)}
+.node-confirm-inputs:disabled{opacity:.6;cursor:default}

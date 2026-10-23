@@ -51,20 +51,28 @@ type SuggestionVariable struct {
 	Source      string `json:"source"`
 	Description string `json:"description"`
 }
+type SuggestionInputField struct {
+	Name        string `json:"name"`
+	Target      string `json:"target"`
+	Path        string `json:"path"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Required    *bool  `json:"required,omitempty"`
+}
 type Suggestion struct {
-	RequestID    string               `json:"requestId"`
-	Label        string               `json:"label"`
-	Description  string               `json:"description"`
-	Category     string               `json:"category"`
-	Dependencies []string             `json:"dependencies"`
-	Confidence   string               `json:"confidence"`
-	Variables    []SuggestionVariable `json:"variables"`
-	Group        string               `json:"group,omitempty"`
-	Inputs       []string             `json:"inputs,omitempty"`
-	Outputs      []string             `json:"outputs,omitempty"`
-	Evidence     []string             `json:"evidence,omitempty"`
-	Uncertainty  string               `json:"uncertainty,omitempty"`
-	Readiness    string               `json:"readiness,omitempty"`
+	RequestID    string                 `json:"requestId"`
+	Label        string                 `json:"label"`
+	Description  string                 `json:"description"`
+	Category     string                 `json:"category"`
+	Dependencies []string               `json:"dependencies"`
+	Confidence   string                 `json:"confidence"`
+	Variables    []SuggestionVariable   `json:"variables"`
+	Group        string                 `json:"group,omitempty"`
+	Inputs       []string               `json:"inputs,omitempty"`
+	InputFields  []SuggestionInputField `json:"inputFields,omitzero"`
+	Outputs      []string               `json:"outputs,omitempty"`
+	Evidence     []string               `json:"evidence,omitempty"`
+	Uncertainty  string                 `json:"uncertainty,omitempty"`
+	Readiness    string                 `json:"readiness,omitempty"`
 }
 type Analysis struct {
 	Summary     string       `json:"summary"`

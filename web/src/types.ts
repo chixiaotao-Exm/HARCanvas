@@ -1,17 +1,18 @@
 import type { Edge, Node } from '@xyflow/react';
 export type Kind = 'input' | 'request' | 'extract' | 'condition' | 'output' | 'manual' | 'assertion';
-export type ParameterBinding = {id:string;name:string;target:'body'|'header'|'query'|'url';path:string;mode:'fixed'|'user'|'upstream'|'runtime'|'manual';value?:string;source?:string;sourcePath?:string;generator?:'uuid'|'timestamp'|'random';required?:boolean;evidence?:string};
+export type ParameterBinding = {id:string;name:string;target:'body'|'header'|'query'|'url';path:string;mode:'fixed'|'user'|'upstream'|'runtime'|'manual';value?:string;source?:string;sourcePath?:string;generator?:'uuid'|'timestamp'|'random';required?:boolean;evidence?:string;placeholder?:string};
+export type UserInputField = {name:string;target:'body'|'query';path:string;placeholder?:string;required?:boolean};
 export type BlockData = {
   kind: Kind; label: string; description?: string; requestId?: string; method?: string; url?: string;
   headers?: Record<string, string>; body?: string; variable?: string; value?: string; source?: string;
   path?: string; operator?: string; expected?: string; template?: string;
   acceptStatus?:string; bindings?:ParameterBinding[]; generatedKey?:string; groupId?:string; groupLabel?:string;
-  readiness?:string; evidence?:string[]; uncertainty?:string; inputs?:string[]; outputs?:string[]; dependencies?:string[];
+  readiness?:string; evidence?:string[]; uncertainty?:string; inputs?:string[]; outputs?:string[]; dependencies?:string[];inputFieldsReviewed?:boolean;
 };
 export type FlowNode = Node<BlockData, 'block'>;
 export type FlowEdge = Edge;
 export type HarRequest = { id: string; method: string; url: string; domain: string; path: string; category: string; mimeType: string; status: number; duration: number; headers: Record<string,string>; body: string; responseBody: string; responseHeaders: Record<string,string>; query:Record<string,string>;responseBodyTruncated?:boolean;responseBodyBytes?:number;responseDetailUrl?:string;pageId?:string;startedDateTime?:string;startedAt?:string };
-export type Suggestion = {requestId:string; label:string; description:string; category:string; dependencies:string[]; confidence:string; variables:{name:string;source:string;description:string}[];group?:string;inputs?:string[];outputs?:string[];evidence?:string[];uncertainty?:string;readiness?:string};
+export type Suggestion = {requestId:string; label:string; description:string; category:string; dependencies:string[]; confidence:string; variables:{name:string;source:string;description:string}[];group?:string;inputs?:string[];outputs?:string[];evidence?:string[];uncertainty?:string;readiness?:string;inputFields?:UserInputField[]};
 export type Analysis = {summary:string; suggestions:Suggestion[]; warnings:string[]};
 export type AgentConfig = {baseUrl:string;apiKey:string;model:string};
 export type RunResult = { status: 'success'|'error'|'cancelled'; steps:{nodeId:string;label:string;kind:Kind;status:'success'|'error'|'skipped'|'cancelled';durationMs:number;result:unknown;error?:string;errorCode?:string}[];variables:Record<string,unknown>|null;output:unknown };

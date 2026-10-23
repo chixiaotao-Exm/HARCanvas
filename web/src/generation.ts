@@ -2,6 +2,7 @@ import type { FlowNode, FlowEdge, HarRequest, Suggestion, BlockData, ParameterBi
 import { getHarBlocks } from './harBlocks.ts';
 import { findFieldRelations, planRequestGroups } from './analysisContext.ts';
 import type { FieldRelation } from './analysisContext.ts';
+import {addUserInputBindings} from './userInputs.ts';
 
 export type GenerationMetadata = {
   generatedKey?:string; groupId?:string; groupLabel?:string;
@@ -11,6 +12,7 @@ export type GenerationMetadata = {
 type Enriched = Suggestion & {group?:string;readiness?:string;evidence?:string[];uncertainty?:string;inputs?:string[];outputs?:string[]};
 const stableId=(value:string)=>{let hash=2166136261;for(const char of value)hash=Math.imul(hash^char.charCodeAt(0),16777619);return (hash>>>0).toString(36);};
 const reserveId=(base:string,occupied:Set<string>)=>{let id=base,index=1;while(occupied.has(id))id=`${base}-${index++}`;occupied.add(id);return id;};
+const nodeSpacing=(data:BlockData)=>{const fields=data.bindings?.filter(binding=>binding.mode==='user').length??0;return fields?330+Math.min(fields,16)*76:260;};
 const fieldNames:Record<string,string>={orderId:'订单编号',ticket:'查询凭据',token:'访问凭据',csrf:'会话校验值',session:'会话标识',cursor:'分页位置'};
 function jsonField(body:string,path:string,safeNumbers=false):unknown {
   let value:unknown=JSON.parse(body,(_key,item:unknown)=>{
@@ -67,8 +69,8 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
   const groupLayout=new Map<string,{x:number;y:number}>();
   for(const node of nodes)if(node.data.groupId){
     const current=groupLayout.get(node.data.groupId);
-    if(current)current.y=Math.max(current.y,node.position.y+260);
-    else groupLayout.set(node.data.groupId,{x:node.position.x,y:node.position.y+260});
+    if(current)current.y=Math.max(current.y,node.position.y+nodeSpacing(node.data));
+    else groupLayout.set(node.data.groupId,{x:node.position.x,y:node.position.y+nodeSpacing(node.data)});
   }
   let addedCount=0;
   for(const block of blocks) {
@@ -95,8 +97,9 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
     const evidence=[...(suggestion.evidence??[]),...relations.map(r=>r.evidence)];
     const uncertainty=[suggestion.uncertainty||(sensitive?'包含抓包时的会话或动态字段，请通过参数向导检查后再运行。':''),...bindingWarnings].filter(Boolean).join('\n');
     const data:BlockData&GenerationMetadata={...block.data,generatedKey,groupId,groupLabel:suggestion.group?.trim().slice(0,100)||group?.label,readiness,evidence:evidence.length?evidence:[`原始记录 ${block.request.id} · ${block.request.method} · HTTP ${block.request.status}`],uncertainty,inputs:suggestion.inputs??suggestion.variables.map(v=>`${v.name}：${v.description}`),outputs:suggestion.outputs??[],dependencies:validDependencies(suggestion.dependencies),...(bindings.length?{bindings}:{})};
-    nextNodes.push({id,type:'block',position:{x:layout.x,y:layout.y},data});
-    layout.y+=260;
+    const inputData=addUserInputBindings({...data,...(suggestion.inputFields!==undefined?{inputFieldsReviewed:true}:{})},suggestion.inputFields);
+    nextNodes.push({id,type:'block',position:{x:layout.x,y:layout.y},data:inputData});
+    layout.y+=nodeSpacing(inputData);
     known.set(block.request.id,id);newIds.add(id);addedCount++;
   }
   const pairKey=(source:string,target:string)=>JSON.stringify([source,target]);
