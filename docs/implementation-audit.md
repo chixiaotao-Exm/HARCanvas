@@ -17,6 +17,10 @@ These tests use synthetic local/mock providers. They do not execute any real HAR
 
 The final full frontend suite passed 165/165; the 24 catalog/component regressions were rerun after the final label changes. Production TypeScript/Vite build and Go suite passed. The existing main-chunk-size advisory remains. The user's actual project was read locally for aggregate compatibility only: 16 nodes, 15 readiness conditions, 134 supported string-field locations and zero reliable automatic source capabilities. This confirms a supported catalog can be built; it does not claim all conditions can be repaired automatically.
 
+## Guided repair deployment acceptance — 2026-10-23
+
+Code revision `e7f8c3a25a4e7e3e47a2620991e2ccb7aae54db6` was published to `20261023-repair-e7f8c3a` at the existing service address. The tar SHA-256 passed before installation; publication used the existing atomic symlink and rollback readiness procedure. Anonymous public index and health returned 200, and public JavaScript/CSS SHA-256 values matched the final local build. The public browser loaded the new fullscreen and repair entries with zero imported records, and native fullscreen entered/exited successfully. Existing authentication settings were preserved. No new real model request or captured target replay was used for deployment verification. GitHub main received the implementation; the prior mainflow release remains available for rollback.
+
 ## Verified
 
 - `web/src/agentJobs.ts` starts each model task once, snapshots optional analysis context, and never retries POST. A terminal model failure no longer reports the successful poll's HTTP 200 as its error status.
