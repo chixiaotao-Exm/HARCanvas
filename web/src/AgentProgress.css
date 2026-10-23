@@ -1,0 +1,16 @@
+.analysis-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 12px 0 8px;
+  padding: 9px;
+  border: 1px solid #514167;
+  border-radius: 6px;
+  background: #2b233b;
+  font-size: 10px;
+  color: #c9b7f7;
+}
+.analysis-progress > span { line-height: 1.6; }
+.analysis-progress > button { font-size: 10px; flex-shrink: 0; padding: 5px; }
+.analysis-summary { white-space: pre-wrap; }
