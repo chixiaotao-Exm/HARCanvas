@@ -102,8 +102,8 @@ type Suggestion = {
 ```
 
 - `POST /api/agent/analyze` → synchronous `Analysis`; analysis failure returns 502 `{error,errorCode}`.
-- `POST /api/agent/jobs` → 202 `{id,status:"running"}`.
-- `GET /api/agent/jobs/{id}` → `{id,status,analysis?,error?,errorCode?}`, status `running|completed|failed|cancelled`.
+- `POST /api/agent/jobs` → 202 `{id,status:"running",progress?}`.
+- `GET /api/agent/jobs/{id}` → `{id,status,analysis?,error?,errorCode?,progress?}`, status `running|completed|failed|cancelled`.
 - `DELETE /api/agent/jobs/{id}` → the current terminal state or `cancelled`; cancellation wins over late provider results.
 
 The configured base URL must end with `/v1`; the backend appends `/chat/completions`. Model/key/URL are required; failures are explicit and never replaced by fake analysis. Each task permits 1–300 requests, a 4 MiB selected-request payload, and a 4 MiB provider response. Analysis context is bounded to 512 KiB, goal to 16,000 bytes, catalog to 1,000 entries, previous suggestions to 300 and relations to 300. The provider call has a 180-second total and response-header timeout by default (`NewAnalyzerWithTimeout` configures it for embedding/tests).
@@ -112,9 +112,11 @@ Analysis failure `errorCode` is application-defined: `invalid_config`, `invalid_
 
 Two shared analysis slots cover synchronous and asynchronous calls. A cancelled task retains its slot until its worker actually exits. Terminal analysis records last 15 minutes, at most 128 records; eviction prefers terminal records. Active task state is process-local and is lost on restart.
 
-The frontend sends sequential batches of at most 50 requests and approximately 96 KiB of request JSON, with UTF-8-safe 12,000-byte body previews. The source capture is unchanged. Batches share the global catalog, grouping/field evidence, goal, and previous suggestions. A failed or cancelled batch stops later batches and preserves completed suggestions. Imports discard stale results. There is no automatic provider retry.
+Job `progress` contains `{stage,elapsedMs,payloadBytes?,contextBytes?,responseBytes?}`. Its fixed stages are `preparing`, `waiting_model`, `reading_response`, `validating`, and `completed`; they advance only with actual model-call activity. Polling reports live elapsed time, and failures retain the last observed stage. No incomplete model JSON becomes an analyzed request or canvas node. Stage logs record correlation/job IDs, byte counts, elapsed time and controlled error codes without model settings, endpoints or HAR values.
 
-`label` is a short Chinese business name. Required, nonblank Chinese `description` explains the request's purpose, input provenance, output and uncertainty; missing descriptions fail analysis rather than receiving a generic fallback. Suggestion request IDs must belong to the submitted batch; dependency IDs may refer to the bounded global catalog. Credential values must not be repeated in explanations. Suggested connections remain editable, and uncertain relations do not become executable connections automatically.
+The frontend sends a first batch of at most 4 requests, then sequential batches of at most 12 requests and 96 KiB of request JSON, with UTF-8-safe 4,096-byte body previews. The source capture and canvas requests remain unchanged. Each batch receives at most 32 KiB of related context, including the goal, current request catalog, supported field relations with their source records, relevant history and limited nearby metadata. This replaces repeatedly sending the entire global catalog. Omitted auxiliary context and shortened previews are disclosed as analysis limitations; identifiers and field paths are never shortened into different evidence. No request is discarded or deduplicated by URL. A failed or cancelled batch stops later batches and preserves completed suggestions. Imports discard stale results. There is no automatic provider retry.
+
+`label` is a short Chinese business name. Required, nonblank Chinese `description` explains the request's purpose, input provenance, output and uncertainty; missing descriptions fail analysis rather than receiving a generic fallback. The prompt requests concise descriptions, summaries and evidence lists to reduce generation time; these are guidance rather than a claim of provider-enforced token limits. Suggestion request IDs must belong to the submitted batch; dependency IDs may refer to the bounded related catalog or history. Credential values must not be repeated in explanations. Suggested connections remain editable, and uncertain relations do not become executable connections automatically.
 
 ## Flow model and preflight
 

@@ -13,11 +13,12 @@ import (
 )
 
 type AgentJobView struct {
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	Analysis  *Analysis `json:"analysis,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	ErrorCode string    `json:"errorCode,omitempty"`
+	ID        string            `json:"id"`
+	Status    string            `json:"status"`
+	Analysis  *Analysis         `json:"analysis,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	ErrorCode string            `json:"errorCode,omitempty"`
+	Progress  *AnalysisProgress `json:"progress,omitempty"`
 }
 
 type agentJob struct {
@@ -110,7 +111,7 @@ func (s *agentJobStore) create(cancel context.CancelFunc) (AgentJobView, error) 
 		}
 		delete(s.items, oldestID)
 	}
-	view := AgentJobView{ID: id, Status: "running"}
+	view := AgentJobView{ID: id, Status: "running", Progress: &AnalysisProgress{Stage: "preparing"}}
 	s.items[id] = &agentJob{view: view, createdAt: now, cancel: cancel}
 	s.scheduleExpiryLocked()
 	return view, nil
@@ -124,7 +125,34 @@ func (s *agentJobStore) get(id string) (AgentJobView, bool) {
 	if !ok {
 		return AgentJobView{}, false
 	}
-	return job.view, true
+	return s.viewLocked(job), true
+}
+
+func (s *agentJobStore) viewLocked(job *agentJob) AgentJobView {
+	view := job.view
+	if view.Progress != nil {
+		progress := *view.Progress
+		end := s.now()
+		if !job.finishedAt.IsZero() {
+			end = job.finishedAt
+		}
+		progress.ElapsedMS = max(int64(0), end.Sub(job.createdAt).Milliseconds())
+		view.Progress = &progress
+	}
+	return view
+}
+
+func (s *agentJobStore) observe(id string, progress AnalysisProgress) {
+	if analysisStageRank(progress.Stage) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.items[id]
+	if job == nil || job.view.Status != "running" || job.view.Progress != nil && analysisStageRank(progress.Stage) < analysisStageRank(job.view.Progress.Stage) {
+		return
+	}
+	job.view.Progress = &progress
 }
 
 func (s *agentJobStore) cancelJob(id string) (AgentJobView, bool) {
@@ -143,7 +171,7 @@ func (s *agentJobStore) cancelJob(id string) (AgentJobView, bool) {
 		job.cancel = nil
 		s.scheduleExpiryLocked()
 	}
-	view := job.view
+	view := s.viewLocked(job)
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -170,7 +198,7 @@ func (s *agentJobStore) finish(id, status string, analysis *Analysis, failure *A
 		job.cancel = nil
 		s.scheduleExpiryLocked()
 	}
-	return job.view
+	return s.viewLocked(job)
 }
 
 var agentJobID = regexp.MustCompile(`^[A-Za-z0-9_-]{24}$`)
@@ -228,6 +256,8 @@ func (s *Server) serveAgentJob(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (s *Server) runAgentJob(ctx context.Context, cancel context.CancelFunc, id, requestID string, config AgentConfig, requests []Request, contexts ...AnalysisContext) {
+	ctx = context.WithValue(ctx, requestIDKey{}, requestID)
+	ctx = context.WithValue(ctx, analysisJobIDKey{}, id)
 	start := time.Now()
 	status, stage := "failed", "analysis"
 	var analysis *Analysis
@@ -248,13 +278,22 @@ func (s *Server) runAgentJob(ctx context.Context, cancel context.CancelFunc, id,
 		view := s.jobs.finish(id, status, analysis, failure)
 		<-s.agentSlots
 		cancel()
-		log.Printf("agent_job event=finish request_id=%s job_id=%s requests=%d duration_ms=%d status=%s stage=%s", requestID, id, len(requests), time.Since(start).Milliseconds(), view.Status, stage)
+		if stage == "analysis" && view.Progress != nil {
+			stage = view.Progress.Stage
+		}
+		errorCode := view.ErrorCode
+		if view.Status == "cancelled" {
+			errorCode = "cancelled"
+		} else if errorCode == "" {
+			errorCode = "none"
+		}
+		log.Printf("agent_job event=finish request_id=%s job_id=%s requests=%d duration_ms=%d status=%s stage=%s error_code=%s", requestID, id, len(requests), time.Since(start).Milliseconds(), view.Status, stage, errorCode)
 	}()
 	var analysisContext AnalysisContext
 	if len(contexts) > 0 {
 		analysisContext = contexts[0]
 	}
-	result, err := s.Analyzer.AnalyzeWithContext(ctx, config, requests, analysisContext)
+	result, err := s.Analyzer.AnalyzeWithObserver(ctx, config, requests, analysisContext, func(progress AnalysisProgress) { s.jobs.observe(id, progress) })
 	if err != nil {
 		failure = publicAnalysisError(err)
 		return

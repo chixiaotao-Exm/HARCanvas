@@ -4,30 +4,41 @@ import type { AnalysisContext } from './analysisContext';
 export const AGENT_JOB_POLL_MS = 1000;
 const CANCEL_TIMEOUT_MS = 2500;
 
+export type AgentJobProgress = {
+  stage: 'preparing' | 'waiting_model' | 'reading_response' | 'validating' | 'completed';
+  elapsedMs: number;
+  payloadBytes?: number;
+  contextBytes?: number;
+  responseBytes?: number;
+};
 export type AgentJobEvent = {
   stage: 'submitted' | 'completed' | 'failed' | 'cancelled';
   jobId?: string;
   requestId?: string;
   status?: number;
+  code?: string;
 };
 export type AgentJobDependencies = {
   fetch?: typeof fetch;
   sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   onEvent?: (event: AgentJobEvent) => void;
+  onProgress?: (progress: AgentJobProgress) => void;
 };
 type ResponseMeta = { status: number; requestId?: string };
-type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; analysis?: unknown; error?: unknown };
+type JobResponse = { id: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; analysis?: unknown; error?: unknown; errorCode?: unknown; progress?: unknown };
 
 export class AgentJobError extends Error {
   status?: number;
   requestId?: string;
   jobId?: string;
-  constructor(message: string, details: { status?: number; requestId?: string; jobId?: string } = {}) {
+  code?: string;
+  constructor(message: string, details: { status?: number; requestId?: string; jobId?: string; code?: string } = {}) {
     super(message);
     this.name = 'AgentJobError';
     this.status = details.status;
     this.requestId = details.requestId;
     this.jobId = details.jobId;
+    this.code = details.code;
   }
 }
 
@@ -81,6 +92,16 @@ export async function analyzeViaJob(
   const fetcher = dependencies.fetch ?? globalThis.fetch.bind(globalThis);
   const sleep = dependencies.sleep ?? sleepForAgentJob;
   const emit = (event: AgentJobEvent) => { try { dependencies.onEvent?.(event); } catch { /* Logging must not alter job execution. */ } };
+  const report = (value: unknown, meta: ResponseMeta) => {
+    if (value === undefined) return; // Older servers do not publish stage metrics.
+    if (!record(value) || typeof value.stage !== 'string' || !['preparing', 'waiting_model', 'reading_response', 'validating', 'completed'].includes(value.stage) || !Number.isSafeInteger(value.elapsedMs) || (value.elapsedMs as number) < 0 || ['payloadBytes', 'contextBytes', 'responseBytes'].some(key => value[key] !== undefined && (!Number.isSafeInteger(value[key]) || (value[key] as number) < 0))) {
+      throw new AgentJobError(failureMessage('分析阶段信息格式不正确', meta), { ...meta, jobId });
+    }
+    // Copy only fixed stages and numeric metrics; provider-controlled extras are discarded.
+    const progress: AgentJobProgress = { stage: value.stage as AgentJobProgress['stage'], elapsedMs: value.elapsedMs as number };
+    for (const key of ['payloadBytes', 'contextBytes', 'responseBytes'] as const) if (value[key] !== undefined) progress[key] = value[key] as number;
+    if (!signal.aborted) try { dependencies.onProgress?.(progress); } catch { /* UI diagnostics do not alter a model call. */ }
+  };
   let jobId: string | undefined;
   let terminal = false;
   let lastMeta: ResponseMeta | undefined;
@@ -139,6 +160,7 @@ export async function analyzeViaJob(
     jobId = submitted.body.id;
     emit({ stage: 'submitted', jobId, ...submitted.meta });
     checkAbort(signal);
+    report(submitted.body.progress, submitted.meta);
     while (true) {
       await sleep(AGENT_JOB_POLL_MS, signal);
       checkAbort(signal);
@@ -148,12 +170,13 @@ export async function analyzeViaJob(
         throw new AgentJobError(failureMessage('分析任务状态格式不正确', polled.meta), { ...polled.meta, jobId });
       }
       const job = polled.body as JobResponse;
+      report(job.progress, polled.meta);
       if (job.status === 'running') continue;
       terminal = true;
       if (job.status === 'cancelled') throw abortError('服务器已取消该分析任务。');
       // HTTP 200 confirms the status query succeeded; it is not the model
       // failure's HTTP status and must not appear as an error code in the UI.
-      if (job.status === 'failed') throw new AgentJobError(jobFailureMessage(polled.meta, plainDiagnostic(job.error) || '服务器未提供错误详情，请检查任务日志。'), { requestId: polled.meta.requestId, jobId });
+      if (job.status === 'failed') throw new AgentJobError(jobFailureMessage(polled.meta, plainDiagnostic(job.error) || '服务器未提供错误详情，请检查任务日志。'), { requestId: polled.meta.requestId, jobId, ...(typeof job.errorCode === 'string' && /^[a-z_]{1,80}$/.test(job.errorCode) ? { code: job.errorCode } : {}) });
       if (!validAnalysis(job.analysis)) throw new AgentJobError(failureMessage('分析任务已结束，但未返回有效分析结果', polled.meta), { ...polled.meta, jobId });
       emit({ stage: 'completed', jobId, ...polled.meta });
       return job.analysis;
@@ -169,7 +192,7 @@ export async function analyzeViaJob(
     // Release it best-effort, but keep the original diagnosis and never retry
     // POST: submitting again could invoke the provider twice.
     await cancelJob();
-    emit({ stage: 'failed', jobId: error.jobId ?? jobId, status: error.status, requestId: error.requestId });
+    emit({ stage: 'failed', jobId: error.jobId ?? jobId, status: error.status, requestId: error.requestId, ...(error.code ? { code: error.code } : {}) });
     throw error;
   } finally {
     signal.removeEventListener('abort', onAbort);

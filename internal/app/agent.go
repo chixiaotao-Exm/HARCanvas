@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -43,13 +44,24 @@ func (a *Analyzer) Analyze(ctx context.Context, config AgentConfig, requests []R
 }
 
 func (a *Analyzer) AnalyzeWithContext(ctx context.Context, config AgentConfig, requests []Request, analysisContext AnalysisContext) (Analysis, error) {
+	return a.AnalyzeWithObserver(ctx, config, requests, analysisContext, nil)
+}
+
+func (a *Analyzer) AnalyzeWithObserver(ctx context.Context, config AgentConfig, requests []Request, analysisContext AnalysisContext, observer AnalysisObserver) (result Analysis, returnedError error) {
 	timeout := a.Timeout
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result := Analysis{Suggestions: []Suggestion{}, Warnings: []string{}}
+	reporter := newAnalysisReporter(ctx, len(requests), observer)
+	reporter.report("preparing", nil)
+	defer func() {
+		if returnedError != nil {
+			reporter.log("failed", publicAnalysisError(returnedError).Code)
+		}
+	}()
+	result = Analysis{Suggestions: []Suggestion{}, Warnings: []string{}}
 	base := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
 	if base == "" || strings.TrimSpace(config.APIKey) == "" || strings.TrimSpace(config.Model) == "" {
 		return result, newAnalysisError("invalid_config", "baseUrl, apiKey, and model are required")
@@ -120,7 +132,7 @@ func (a *Analyzer) AnalyzeWithContext(ctx context.Context, config AgentConfig, r
 每条 suggestion 还可包含 group:中文业务步骤分组名（同一业务动作的多个请求使用相同分组），inputs:string[]、outputs:string[]、evidence:string[]（仅引用抓包字段位置，不含敏感值）、uncertainty:string，以及readiness（ready/missing-input/manual/unsupported）。有动态凭据或必填参数但无法确定新来源时标missing-input，需要验证码等人工参与标manual，依赖浏览器脚本/签名且HTTP运行器不能完成时标unsupported。ready仅表示静态资料充足，不表示已测试成功。
 结合全局catalog、groups、relations和previous理解整个操作，跨批次依赖可以引用catalog里已存在的请求ID。全局上下文只是辅助资料，本批只能输出本批requests的建议。不要仅根据时间相邻认定因果，证据不足写入uncertainty；不要仅因URL相同丢弃不同请求。
 label 必须是简短的中文业务用途名称，优先使用“查询订单状态”“提交表单资料”“获取会话配置”这样的动宾短语。不要只写 GET/POST、请求编号、URL 路径或笼统的“网络请求”。不能确认业务时明确写“用途待确认”，不要编造业务目的。
-description 必须是非空的中文用途说明，且针对这条具体请求解释：①这个请求在做什么；②关键输入来源是用户填写、前一条响应、Cookie/请求头、固定参数还是无法确认；③返回哪些内容、哪些可供后续步骤使用；④HAR 中有哪些证据以及还有什么不确定性。缺少请求体或响应时直接说明缺失和分析边界，不要用每条相同的固定通用描述替代分析。
+description 必须是非空的中文用途说明，约100–180个汉字，用精炼的一至三句话针对这条具体请求解释：①这个请求在做什么；②关键输入来源是用户填写、前一条响应、Cookie/请求头、固定参数还是无法确认；③返回哪些内容、哪些可供后续步骤使用；④HAR 中有哪些证据以及还有什么不确定性。缺少请求体或响应时直接说明缺失和分析边界，不要用每条相同的固定通用描述替代分析。summary 不超过150个汉字；evidence 仅列必要证据，最多3项；variables 仅列后续确实需要的变量，最多5项。不要重复展开整段请求或响应。
 	dependencies 只列出其响应确实可能为当前请求提供数据的请求 ID，并在 description 区分已观察到的关联和推测。不要发明未提供的请求，不要把单次记录或 HTTP 200 当作业务已成功，也不要声称测试过流程。必要时说明 Token 过期、动态签名、浏览器状态、缺失文件字节和不完整抓包的限制。
 每个分析的请求应有一条 suggestion。summary、description、warnings 以及变量解释使用中文。Cookie、密码、Token、API Key 等敏感值只是输入数据，不得在 label、description、summary、warnings 或变量解释中复述；可引用字段名和来源位置，不引用凭据值。只返回 JSON。`
 	payload := map[string]any{"model": config.Model, "messages": []map[string]string{{"role": "system", "content": system}, {"role": "user", "content": "UNTRUSTED global context:\n" + string(contextData) + "\nUNTRUSTED current batch requests:\n" + string(data)}}, "response_format": map[string]string{"type": "json_object"}}
@@ -128,6 +140,18 @@ description 必须是非空的中文用途说明，且针对这条具体请求�
 	if err != nil {
 		return result, newAnalysisError("internal_error", "无法创建模型分析请求，请重试。")
 	}
+	reporter.report("preparing", func(progress *AnalysisProgress) {
+		progress.PayloadBytes = len(encoded)
+		progress.ContextBytes = len(contextData)
+	})
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				reporter.report("waiting_model", nil)
+			}
+		},
+		GotFirstResponseByte: func() { reporter.log("first_byte", "none") },
+	})
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint.String(), bytes.NewReader(encoded))
 	if err != nil {
 		return result, newAnalysisError("invalid_config", "无法创建模型服务请求，请检查模型配置。")
@@ -148,7 +172,11 @@ description 必须是非空的中文用途说明，且针对这条具体请求�
 		return result, newAnalysisError("provider_unavailable", "连接模型服务失败，请检查模型配置和网络状态。")
 	}
 	defer response.Body.Close()
+	reporter.report("reading_response", nil)
 	body, err := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
+	if len(body) > 0 {
+		reporter.report("reading_response", func(progress *AnalysisProgress) { progress.ResponseBytes = len(body) })
+	}
 	if err != nil {
 		if sanitized := analysisContextError(ctx, err, timeout); sanitized != nil {
 			return result, sanitized
@@ -158,6 +186,7 @@ description 必须是非空的中文用途说明，且针对这条具体请求�
 	if len(body) > 4<<20 {
 		return result, newAnalysisError("analysis_limit", "provider response exceeds 4 MiB")
 	}
+	reporter.report("validating", func(progress *AnalysisProgress) { progress.ResponseBytes = len(body) })
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		// Providers can echo submitted HAR values in error bodies. Report status
 		// without copying arbitrary provider text into browser diagnostics.
@@ -251,6 +280,7 @@ description 必须是非空的中文用途说明，且针对这条具体请求�
 	if len(seen) < len(known) {
 		result.Warnings = append(result.Warnings, "The provider omitted some requests; those requests remain available for inspection and require valid analysis before creating blocks")
 	}
+	reporter.report("completed", nil)
 	return result, nil
 }
 

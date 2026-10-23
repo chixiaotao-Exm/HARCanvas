@@ -263,3 +263,47 @@ test('default wait supports immediate cancellation without waiting for its timer
   await assert.rejects(wait, { name: 'AbortError' });
   await assert.rejects(sleepForAgentJob(60000, controller.signal), { name: 'AbortError' });
 });
+
+test('real model stages publish numeric diagnostics without exposing provider extras or premature analysis', async () => {
+  const reports = [], events = [];
+  const stages = ['waiting_model', 'reading_response', 'validating'];
+  let polls = 0;
+  const result = await analyzeViaJob(config, requests, new AbortController().signal, {
+    fetch: async (_, init) => {
+      if (init.method === 'POST') return json({ id: 'job-1', status: 'running', progress: { stage: 'preparing', elapsedMs: 0 } }, 202);
+      if (polls < stages.length) return json({ id: 'job-1', status: 'running', progress: { stage: stages[polls++], elapsedMs: polls * 1000, payloadBytes: 1234, contextBytes: 256, privateKey: config.apiKey, rawPayload: requests[0].body } });
+      return json({ id: 'job-1', status: 'completed', analysis, progress: { stage: 'completed', elapsedMs: 4100, responseBytes: 512 } });
+    }, sleep: immediateSleep, onProgress: value => reports.push(value), onEvent: value => events.push(value),
+  });
+  assert.deepEqual(result, analysis);
+  assert.deepEqual(reports.map(value => value.stage), ['preparing', ...stages, 'completed']);
+  assert.equal(reports[1].payloadBytes, 1234);
+  assert.deepEqual(events.map(value => value.stage), ['submitted', 'completed']);
+  assert.ok(!JSON.stringify(reports).includes(config.apiKey));
+  assert.ok(!JSON.stringify(reports).includes(requests[0].body));
+  assert.ok(reports.every(value => !Object.hasOwn(value, 'rawPayload')));
+});
+
+test('invalid stage diagnostics cancel the known task without retrying the model', async () => {
+  for (const progress of [{ stage: '<script>secret</script>', elapsedMs: 1 }, { stage: ['preparing'], elapsedMs: 1 }, { stage: 'waiting_model', elapsedMs: -1 }, { stage: 'reading_response', elapsedMs: 100, responseBytes: 'private-response' }]) {
+    const methods = [], reports = [];
+    await assert.rejects(analyzeViaJob(config, requests, new AbortController().signal, {
+      fetch: async (_, init) => { methods.push(init.method); return init.method === 'POST' ? start() : json({ id: 'job-1', status: 'running', progress }); },
+      sleep: immediateSleep, onProgress: value => reports.push(value),
+    }), error => /阶段信息格式不正确/.test(error.message) && !error.message.includes('script') && !error.message.includes('private-response'));
+    assert.deepEqual(methods, ['POST', 'GET', 'DELETE']);
+    assert.deepEqual(reports, []);
+  }
+});
+
+test('model timeout preserves its last actual stage and controlled error code', async () => {
+  const events = [], reports = [];
+  await assert.rejects(analyzeViaJob(config, requests, new AbortController().signal, {
+    fetch: async (_, init) => init.method === 'POST' ? start() : json({ id: 'job-1', status: 'failed', error: '等待模型服务响应超时', errorCode: 'timeout', progress: { stage: 'waiting_model', elapsedMs: 180000 } }),
+    sleep: immediateSleep, onProgress: value => reports.push(value), onEvent: value => events.push(value),
+  }), error => error.code === 'timeout' && /超时/.test(error.message));
+  assert.equal(reports.at(-1).stage, 'waiting_model');
+  assert.equal(events.at(-1).code, 'timeout');
+  const result = await analyzeViaJob(config, requests, new AbortController().signal, { fetch: async (_, init) => init.method === 'POST' ? start() : completed(), sleep: immediateSleep, onProgress: () => { throw new Error('ignored UI diagnostic failure'); } });
+  assert.deepEqual(result, analysis);
+});

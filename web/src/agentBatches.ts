@@ -1,10 +1,11 @@
 import type { AgentConfig, Analysis, HarRequest } from './types';
-import { boundAnalysisContext, buildAnalysisContext } from './analysisContext.ts';
+import { buildAnalysisContext, planAnalysisContextForBatch } from './analysisContext.ts';
 import type { AnalysisContext } from './analysisContext.ts';
 
-export const ANALYSIS_BATCH_SIZE = 50;
+export const ANALYSIS_FIRST_BATCH_SIZE = 4;
+export const ANALYSIS_BATCH_SIZE = 12;
 export const ANALYSIS_BATCH_BYTES = 96 * 1024;
-const BODY_BYTES = 12000;
+export const ANALYSIS_PREVIEW_BYTES = 4096;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -13,14 +14,16 @@ export type AnalysisProgress = {
   totalBatches: number;
   completedRequests: number;
   totalRequests: number;
+  batchRequests: number;
+  batchStartedAt: number;
 };
 
-// Match the backend's body budget before uploading, without changing the HAR
-// used by the canvas. Avoid cutting through a UTF-8 code point.
+// Analysis uses a smaller view without changing the HAR used by the canvas.
+// Avoid cutting through a UTF-8 code point.
 function preview(value: string): string {
-  const bytes = encoder.encode(value.slice(0, BODY_BYTES));
-  if (bytes.length <= BODY_BYTES) return decoder.decode(bytes);
-  let end = BODY_BYTES;
+  const bytes = encoder.encode(value.slice(0, ANALYSIS_PREVIEW_BYTES));
+  if (bytes.length <= ANALYSIS_PREVIEW_BYTES) return decoder.decode(bytes);
+  let end = ANALYSIS_PREVIEW_BYTES;
   while ((bytes[end] & 0xc0) === 0x80) end--;
   return decoder.decode(bytes.subarray(0, end));
 }
@@ -42,7 +45,7 @@ export function planAnalysisBatches(requests: HarRequest[]) {
     if (size + 2 > ANALYSIS_BATCH_BYTES) {
       throw new Error(`请求 ${original.id} 的地址或请求头过大，无法放入分析批次。请先筛除该请求。`);
     }
-    if (batch.length && (batch.length >= ANALYSIS_BATCH_SIZE || bytes + size + 1 > ANALYSIS_BATCH_BYTES)) {
+    if (batch.length && (batch.length >= (batches.length?ANALYSIS_BATCH_SIZE:ANALYSIS_FIRST_BATCH_SIZE) || bytes + size + 1 > ANALYSIS_BATCH_BYTES)) {
       batches.push(batch);
       batch = [];
       bytes = 2;
@@ -52,7 +55,7 @@ export function planAnalysisBatches(requests: HarRequest[]) {
   }
   if (batch.length) batches.push(batch);
   const warnings: string[] = [];
-  if (previewCount) warnings.push(`${previewCount} 条请求的正文或响应按前 12000 字节预览分析；原始 HAR 和画布请求保持完整。`);
+  if (previewCount) warnings.push(`${previewCount} 条请求的正文或响应仅按前 4096 字节预览分析；预览以外的内容需按原始记录核对，原始 HAR 和画布请求保持完整。`);
   if (batches.length > 1) warnings.push('跨批次共享全局目录、已识别步骤和字段关联；证据不足的依赖仍需人工核对。');
   return { batches, warnings };
 }
@@ -70,7 +73,7 @@ export async function analyzeInBatches(options: BatchOptions) {
   const { batches, warnings } = planAnalysisBatches(options.requests);
   const config = { ...options.config };
   const globalContext = buildAnalysisContext(options.requests, options.goal);
-  const contextWarning='全局辅助目录、字段关系或历史建议已按大小预算裁剪；本批请求仍单独完整列入分析，原始 HAR 和画布数据保持完整。';
+  const contextWarning='全局辅助目录、字段关系或历史建议已按本批范围及大小预算裁剪；本批请求单独列入预览分析，原始 HAR 和画布数据保持完整。';
   if(globalContext.truncated)warnings.push(contextWarning);
   const suggestions = new Map<string, Analysis['suggestions'][number]>();
   const summaries: string[] = [];
@@ -85,10 +88,10 @@ export async function analyzeInBatches(options: BatchOptions) {
   });
   for (let i = 0; i < batches.length; i++) {
     if (options.signal.aborted) { status = 'cancelled'; break; }
-    const progress = { batch: i + 1, totalBatches: batches.length, completedRequests, totalRequests: options.requests.length };
+    const progress = { batch: i + 1, totalBatches: batches.length, completedRequests, totalRequests: options.requests.length, batchRequests:batches[i].length, batchStartedAt:Date.now() };
     options.onProgress?.(progress, snapshot());
     try {
-      const context=boundAnalysisContext({...globalContext,previous:[...suggestions.values()].map(s=>({requestId:s.requestId,label:s.label,dependencies:s.dependencies??[]}))});
+      const context=planAnalysisContextForBatch(globalContext,batches[i],[...suggestions.values()]);
       if(context.truncated&&!warnings.includes(contextWarning))warnings.push(contextWarning);
       const result = await options.analyzeBatch(config, batches[i], options.signal, context);
       if (options.signal.aborted) { status = 'cancelled'; break; }

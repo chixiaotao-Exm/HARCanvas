@@ -11,6 +11,7 @@ export type AnalysisContext = {
   truncated?: boolean;
 };
 export const ANALYSIS_CONTEXT_BYTES = 480 * 1024;
+export const ANALYSIS_BATCH_CONTEXT_BYTES = 32 * 1024;
 const encoder = new TextEncoder();
 
 /** Bound the complete serialized context, including refreshed batch history. */
@@ -54,6 +55,86 @@ export function boundAnalysisContext(context:AnalysisContext):AnalysisContext {
   if(!truncated)delete result.truncated;
   return result;
 }
+/** Scope each model call to its requests and recorded neighbors, not the full capture. */
+export function planAnalysisContextForBatch(context:AnalysisContext,requests:HarRequest[],previous:readonly Pick<Suggestion,'requestId'|'label'|'dependencies'>[]=context.previous):AnalysisContext {
+  let truncated=Boolean(context.truncated);
+  const validId=(id:string)=>typeof id==='string'&&id.length>0&&id.length<=128;
+  const text=(value:string,limit:number)=>{if(value.length>limit)truncated=true;return value.slice(0,limit);};
+  type CatalogItem=AnalysisContext['catalog'][number];
+  const catalogItem=(item:CatalogItem):CatalogItem=>({id:item.id,method:text(item.method,16),domain:text(item.domain,200),path:text(item.path,200),category:text(item.category,32),...(item.pageId===undefined?{}:{pageId:text(item.pageId,160)})});
+  const catalog=new Map(context.catalog.filter(item=>validId(item.id)).map(item=>[item.id,catalogItem(item)]));
+  for(const request of requests)if(validId(request.id))catalog.set(request.id,catalogItem({id:request.id,method:request.method,domain:request.domain,path:request.path,category:request.category,pageId:request.pageId}));else truncated=true;
+  const currentIds=new Set(requests.map(request=>request.id));
+  const histories=new Map<string,AnalysisContext['previous'][number]>();
+  for(const item of previous){
+    if(!validId(item.requestId)){truncated=true;continue;}
+    const dependencies=[...new Set(item.dependencies.filter(id=>{if(!validId(id)){truncated=true;return false;}return true;}))];
+    if(dependencies.length>64)truncated=true;
+    const relevantFirst=[...dependencies.filter(id=>currentIds.has(id)),...dependencies.filter(id=>!currentIds.has(id))];
+    histories.set(item.requestId,{requestId:item.requestId,label:text(item.label,100),dependencies:relevantFirst.slice(0,64)});
+  }
+  let result:AnalysisContext={goal:text(context.goal,4000),catalog:[],groups:[],relations:[],previous:[],truncated:true};
+  const commit=(next:AnalysisContext)=>{if(encoder.encode(JSON.stringify(next)).byteLength>ANALYSIS_BATCH_CONTEXT_BYTES){truncated=true;return false;}result=next;return true;};
+  const known=()=>new Set([...result.catalog.map(item=>item.id),...result.previous.map(item=>item.requestId)]);
+  for(const request of requests){
+    const item=catalog.get(request.id);if(!item||result.catalog.some(existing=>existing.id===item.id))continue;
+    if(!commit({...result,catalog:[...result.catalog,item]})){
+      // Current requests carry their full metadata separately; retain the ID here.
+      commit({...result,catalog:[...result.catalog,{id:item.id,method:item.method,domain:'',path:'',category:item.category}]});
+    }
+  }
+  const related=context.relations.filter(relation=>currentIds.has(relation.sourceRequestId)||currentIds.has(relation.targetRequestId));
+  const focusIds=new Set(currentIds);
+  for(const relation of related){
+    if(!validId(relation.sourceRequestId)||!validId(relation.targetRequestId)||relation.sourcePath.length>1024||relation.targetPath.length>1024){truncated=true;continue;}
+    const ids=[relation.sourceRequestId,relation.targetRequestId],knownIds=known(),addedCatalog:CatalogItem[]=[],addedHistory:AnalysisContext['previous']=[];
+    let missing=false;
+    for(const id of ids)if(!knownIds.has(id)){
+      const item=catalog.get(id),history=histories.get(id);
+      if(item)addedCatalog.push(item);else if(history)addedHistory.push({...history,dependencies:[]});else{missing=true;break;}
+      knownIds.add(id);
+    }
+    if(missing){truncated=true;continue;}
+    const item={...relation,evidence:text(relation.evidence,2400)};
+    if(commit({...result,catalog:[...result.catalog,...addedCatalog],previous:[...result.previous,...addedHistory],relations:[...result.relations,item]}))ids.forEach(id=>focusIds.add(id));
+  }
+  // Keep suggestions attached to this batch, their direct dependencies, and a
+  // short recent history. Complete model results remain outside this view.
+  const direct=[...histories.values()].filter(item=>focusIds.has(item.requestId)||item.dependencies.some(id=>focusIds.has(id)));
+  const dependencyIds=new Set(direct.flatMap(item=>item.dependencies));
+  const priority=[...direct,...[...histories.values()].filter(item=>dependencyIds.has(item.requestId)),...[...histories.values()].slice(-4)];
+  const visited=new Set<string>();
+  for(const history of priority){
+    if(visited.has(history.requestId))continue;visited.add(history.requestId);
+    if(!result.previous.some(item=>item.requestId===history.requestId)&&!commit({...result,previous:[...result.previous,{...history,dependencies:[]}]}))continue;
+    for(const id of history.dependencies){
+      const knownIds=known(),item=catalog.get(id),dependency=histories.get(id);
+      if(!knownIds.has(id)&&!item&&!dependency){truncated=true;continue;}
+      const nextCatalog=!knownIds.has(id)&&item?[...result.catalog,item]:result.catalog;
+      const nextPrevious=!knownIds.has(id)&&!item&&dependency?[...result.previous,{...dependency,dependencies:[]}]:result.previous;
+      commit({...result,catalog:nextCatalog,previous:nextPrevious.map(existing=>existing.requestId===history.requestId?{...existing,dependencies:[...new Set([...existing.dependencies,id])]}:existing)});
+    }
+  }
+  const positions=context.catalog.flatMap((item,index)=>currentIds.has(item.id)?[index]:[]);
+  if(positions.length){
+    const first=Math.min(...positions),last=Math.max(...positions);
+    for(const index of [first-2,first-1,last+1,last+2]){
+      const source=context.catalog[index],item=source&&catalog.get(source.id);
+      if(item&&!known().has(item.id))commit({...result,catalog:[...result.catalog,item]});
+    }
+  }
+  const knownIds=known();
+  for(const group of context.groups){
+    const requestIds=group.requestIds.filter(id=>knownIds.has(id));
+    if(!requestIds.length)continue;
+    if(requestIds.length!==group.requestIds.length)truncated=true;
+    commit({...result,groups:[...result.groups,{id:text(group.id,360),label:text(group.label,240),kind:group.kind,requestIds}]});
+  }
+  if(result.catalog.length<context.catalog.length||result.groups.length<context.groups.length||result.relations.length<context.relations.length||result.previous.length<histories.size)truncated=true;
+  if(!truncated)delete result.truncated;
+  return result;
+}
+
 type Leaf = {path:string; value:string};
 const safeKey = (key:string) => !/[.{}]/.test(key) && !['__proto__','prototype','constructor'].includes(key);
 function leaves(value:unknown, prefix:string, result:Leaf[]=[], depth=0):Leaf[] {

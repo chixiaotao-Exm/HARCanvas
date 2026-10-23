@@ -1,0 +1,21 @@
+.analysis-progress .analysis-stage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.analysis-progress .analysis-timing,
+.analysis-progress .analysis-wait-note {
+  display: block;
+  margin-top: 5px;
+  font-size: 9px;
+  line-height: 1.8;
+}
+
+.analysis-progress .analysis-wait-note {
+  color: var(--text);
+}
