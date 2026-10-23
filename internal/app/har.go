@@ -18,9 +18,11 @@ type harPair struct {
 	Value string `json:"value"`
 }
 type harEntry struct {
-	Time         float64 `json:"time"`
-	ResourceType string  `json:"_resourceType"`
-	Request      struct {
+	PageID          string  `json:"pageref"`
+	StartedDateTime string  `json:"startedDateTime"`
+	Time            float64 `json:"time"`
+	ResourceType    string  `json:"_resourceType"`
+	Request         struct {
 		Method   string    `json:"method"`
 		URL      string    `json:"url"`
 		Headers  []harPair `json:"headers"`
@@ -55,6 +57,7 @@ func ParseHAR(raw json.RawMessage) (ParseResult, error) {
 	result := ParseResult{Requests: []Request{}, Warnings: []string{}, Summary: HARSummary{Domains: []string{}}}
 	var root struct {
 		Log *struct {
+			Pages   []HARPage  `json:"pages"`
 			Entries []harEntry `json:"entries"`
 		} `json:"log"`
 	}
@@ -67,8 +70,16 @@ func ParseHAR(raw json.RawMessage) (ParseResult, error) {
 	if len(root.Log.Entries) > 10000 {
 		return result, errors.New("HAR contains over 10000 entries; split the capture before importing")
 	}
+	result.Pages = root.Log.Pages
+	if result.Pages == nil {
+		result.Pages = []HARPage{}
+	}
 	domains := map[string]bool{}
 	for i, entry := range root.Log.Entries {
+		if strings.TrimSpace(entry.Request.Method) == "" {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("req-%d: skipped record without HTTP method", i+1))
+			continue
+		}
 		u, err := url.Parse(entry.Request.URL)
 		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("req-%d: skipped invalid or non-HTTP URL", i+1))
@@ -129,6 +140,9 @@ func ParseHAR(raw json.RawMessage) (ParseResult, error) {
 		}
 		category := classify(entry.ResourceType, entry.Response.Content.MimeType, u.Path, entry.Request.Method)
 		r := Request{ID: fmt.Sprintf("req-%d", i+1), Method: strings.ToUpper(entry.Request.Method), URL: entry.Request.URL, Domain: u.Host, Path: u.Path, Category: category, MimeType: entry.Response.Content.MimeType, Status: entry.Response.Status, Duration: entry.Time, Headers: headers, Body: body, ResponseBody: responseBody, ResponseHeaders: responseHeaders, Query: query}
+		r.PageID = entry.PageID
+		r.StartedDateTime = entry.StartedDateTime
+		r.StartedAt = entry.StartedDateTime
 		result.Requests = append(result.Requests, r)
 		domains[u.Host] = true
 		if category == "api" {

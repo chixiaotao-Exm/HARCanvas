@@ -14,18 +14,22 @@ import (
 )
 
 type Server struct {
-	Runner     *Runner
-	Analyzer   *Analyzer
-	WebDir     string
-	SampleHAR  string
-	sampleMu   sync.Mutex
-	sample     *sampleSnapshot
-	runSlots   chan struct{}
-	agentSlots chan struct{}
+	Runner      *Runner
+	Analyzer    *Analyzer
+	WebDir      string
+	SampleHAR   string
+	sampleMu    sync.Mutex
+	sample      *sampleSnapshot
+	runSlots    chan struct{}
+	agentSlots  chan struct{}
+	jobs        *agentJobStore
+	flowJobs    *flowJobStore
+	uploads     *harUploadStore
+	uploadSlots chan struct{}
 }
 
 func NewServer(webDir string) *Server {
-	return &Server{Runner: NewRunner(), Analyzer: NewAnalyzer(), WebDir: webDir, SampleHAR: filepath.Join("samples", "re.har"), runSlots: make(chan struct{}, 2), agentSlots: make(chan struct{}, 2)}
+	return &Server{Runner: NewRunner(), Analyzer: NewAnalyzer(), WebDir: webDir, SampleHAR: filepath.Join("samples", "re.har"), runSlots: make(chan struct{}, 2), agentSlots: make(chan struct{}, 2), jobs: newAgentJobStore(), flowJobs: newFlowJobStore(), uploads: newHARUploadStore(), uploadSlots: make(chan struct{}, 2)}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +61,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeJSON(w, 200, result)
+		case "/api/har/upload":
+			s.uploadHAR(w, r)
 		case "/api/har/example":
 			if r.Method != "GET" {
 				methodError(w, "GET")
@@ -69,8 +75,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var input struct {
-				Config   AgentConfig `json:"config"`
-				Requests []Request   `json:"requests"`
+				Config   AgentConfig     `json:"config"`
+				Requests []Request       `json:"requests"`
+				Context  AnalysisContext `json:"context"`
 			}
 			if !decodeBody(w, r, &input) {
 				return
@@ -82,12 +89,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeError(w, 429, "Two analyses are already running; retry when one finishes")
 				return
 			}
-			result, err := s.Analyzer.Analyze(r.Context(), input.Config, input.Requests)
+			result, err := s.Analyzer.AnalyzeWithContext(r.Context(), input.Config, input.Requests, input.Context)
 			if err != nil {
-				writeError(w, 502, err.Error())
+				failure := publicAnalysisError(err)
+				writeJSON(w, 502, map[string]string{"error": failure.Error(), "errorCode": failure.Code})
 				return
 			}
 			writeJSON(w, 200, result)
+		case "/api/agent/jobs":
+			if r.Method != "POST" {
+				methodError(w, "POST")
+				return
+			}
+			s.createAgentJob(w, r)
+		case "/api/flow/validate":
+			if r.Method != "POST" {
+				methodError(w, "POST")
+				return
+			}
+			s.validateFlow(w, r)
+		case "/api/flow/jobs":
+			if r.Method != "POST" {
+				methodError(w, "POST")
+				return
+			}
+			s.createFlowJob(w, r)
 		case "/api/flow/run":
 			if r.Method != "POST" {
 				methodError(w, "POST")
@@ -106,12 +132,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			result, err := s.Runner.Run(r.Context(), input)
 			if err != nil {
-				writeError(w, 400, err.Error())
+				var validation *FlowValidationError
+				if errors.As(err, &validation) {
+					writeJSON(w, 400, validation.Validation)
+				} else {
+					writeError(w, 400, err.Error())
+				}
 				return
 			}
 			writeJSON(w, 200, result)
 		default:
-			if strings.HasPrefix(r.URL.Path, "/api/har/example/requests/") {
+			if strings.HasPrefix(r.URL.Path, "/api/har/uploads/") {
+				s.serveUploadedHAR(w, r, strings.TrimPrefix(r.URL.Path, "/api/har/uploads/"))
+			} else if strings.HasPrefix(r.URL.Path, "/api/flow/jobs/") {
+				s.serveFlowJob(w, r, strings.TrimPrefix(r.URL.Path, "/api/flow/jobs/"))
+			} else if strings.HasPrefix(r.URL.Path, "/api/agent/jobs/") {
+				s.serveAgentJob(w, r, strings.TrimPrefix(r.URL.Path, "/api/agent/jobs/"))
+			} else if strings.HasPrefix(r.URL.Path, "/api/har/example/requests/") {
 				if r.Method != "GET" {
 					methodError(w, "GET")
 					return

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -36,7 +37,8 @@ func TestRunnerDependenciesTemplatesAndSession(t *testing.T) {
 			t.Fatalf("wrong templated URL: %s", req.URL)
 		}
 		body, _ := io.ReadAll(req.Body)
-		if string(body) != `{"name":"Ada","item":"abc"}` {
+		var payload map[string]string
+		if json.Unmarshal(body, &payload) != nil || payload["name"] != "Ada" || payload["item"] != "abc" || len(payload) != 2 {
 			t.Fatalf("wrong templated body: %s", body)
 		}
 		cookies := req.Cookies()
@@ -169,8 +171,12 @@ func TestTemplateMissingReferencesMalformedAndExpansionLimit(t *testing.T) {
 }
 
 func TestRunnerReportsFailureAndSkipsRemainder(t *testing.T) {
-	flow := Flow{Nodes: []FlowNode{block("bad", BlockData{Kind: "output", Template: "{{missing}}"}), block("next", BlockData{Kind: "output", Template: "should not run"})}, Edges: []FlowEdge{connect("bad", "next")}}
-	result, err := NewRunner().Run(context.Background(), flow)
+	flow := Flow{Nodes: []FlowNode{block("bad", BlockData{Kind: "request", URL: "https://8.8.8.8/failure"}), block("next", BlockData{Kind: "output", Template: "should not run"})}, Edges: []FlowEdge{connect("bad", "next")}}
+	runner := NewRunner()
+	runner.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(500, `{"error":"simulated failure"}`, nil), nil
+	})
+	result, err := runner.Run(context.Background(), flow)
 	if err != nil || result.Status != "error" || result.Steps[0].Status != "error" || result.Steps[1].Status != "skipped" {
 		t.Fatalf("%+v %v", result, err)
 	}

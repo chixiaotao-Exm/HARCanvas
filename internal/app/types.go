@@ -4,6 +4,9 @@ import "encoding/json"
 
 type Request struct {
 	ID                    string            `json:"id"`
+	PageID                string            `json:"pageId,omitempty"`
+	StartedAt             string            `json:"startedAt,omitempty"`
+	StartedDateTime       string            `json:"startedDateTime,omitempty"`
 	Method                string            `json:"method"`
 	URL                   string            `json:"url"`
 	Domain                string            `json:"domain"`
@@ -17,6 +20,7 @@ type Request struct {
 	ResponseBody          string            `json:"responseBody"`
 	ResponseBodyTruncated bool              `json:"responseBodyTruncated,omitempty"`
 	ResponseBodyBytes     int               `json:"responseBodyBytes,omitempty"`
+	ResponseDetailURL     string            `json:"responseDetailUrl,omitempty"`
 	ResponseHeaders       map[string]string `json:"responseHeaders"`
 	Query                 map[string]string `json:"query"`
 }
@@ -30,6 +34,12 @@ type ParseResult struct {
 	Requests []Request  `json:"requests"`
 	Summary  HARSummary `json:"summary"`
 	Warnings []string   `json:"warnings"`
+	Pages    []HARPage  `json:"pages,omitempty"`
+}
+type HARPage struct {
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	StartedDateTime string `json:"startedDateTime"`
 }
 type AgentConfig struct {
 	BaseURL string `json:"baseUrl"`
@@ -49,6 +59,12 @@ type Suggestion struct {
 	Dependencies []string             `json:"dependencies"`
 	Confidence   string               `json:"confidence"`
 	Variables    []SuggestionVariable `json:"variables"`
+	Group        string               `json:"group,omitempty"`
+	Inputs       []string             `json:"inputs,omitempty"`
+	Outputs      []string             `json:"outputs,omitempty"`
+	Evidence     []string             `json:"evidence,omitempty"`
+	Uncertainty  string               `json:"uncertainty,omitempty"`
+	Readiness    string               `json:"readiness,omitempty"`
 }
 type Analysis struct {
 	Summary     string       `json:"summary"`
@@ -56,21 +72,22 @@ type Analysis struct {
 	Warnings    []string     `json:"warnings"`
 }
 type BlockData struct {
-	Kind        string            `json:"kind"`
-	Label       string            `json:"label"`
-	Description string            `json:"description,omitempty"`
-	RequestID   string            `json:"requestId,omitempty"`
-	Method      string            `json:"method,omitempty"`
-	URL         string            `json:"url,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Body        string            `json:"body,omitempty"`
-	Variable    string            `json:"variable,omitempty"`
-	Value       string            `json:"value,omitempty"`
-	Source      string            `json:"source,omitempty"`
-	Path        string            `json:"path,omitempty"`
-	Operator    string            `json:"operator,omitempty"`
-	Expected    string            `json:"expected,omitempty"`
-	Template    string            `json:"template,omitempty"`
+	Kind         string            `json:"kind"`
+	Label        string            `json:"label"`
+	Description  string            `json:"description,omitempty"`
+	RequestID    string            `json:"requestId,omitempty"`
+	Method       string            `json:"method,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Body         string            `json:"body,omitempty"`
+	Variable     string            `json:"variable,omitempty"`
+	Value        string            `json:"value,omitempty"`
+	Source       string            `json:"source,omitempty"`
+	Path         string            `json:"path,omitempty"`
+	Operator     string            `json:"operator,omitempty"`
+	Expected     string            `json:"expected,omitempty"`
+	Template     string            `json:"template,omitempty"`
+	AcceptStatus string            `json:"acceptStatus,omitempty"`
 }
 type FlowNode struct {
 	ID       string          `json:"id"`
@@ -85,9 +102,11 @@ type FlowEdge struct {
 	SourceHandle string `json:"sourceHandle,omitempty"`
 }
 type Flow struct {
-	Nodes  []FlowNode        `json:"nodes"`
-	Edges  []FlowEdge        `json:"edges"`
-	Inputs map[string]string `json:"inputs"`
+	EntryID     string            `json:"entryId,omitempty"`
+	EntryNodeID string            `json:"entryNodeId,omitempty"`
+	Nodes       []FlowNode        `json:"nodes"`
+	Edges       []FlowEdge        `json:"edges"`
+	Inputs      map[string]string `json:"inputs"`
 }
 type Step struct {
 	NodeID     string `json:"nodeId"`
@@ -97,6 +116,7 @@ type Step struct {
 	DurationMS int64  `json:"durationMs"`
 	Result     any    `json:"result"`
 	Error      string `json:"error,omitempty"`
+	ErrorCode  string `json:"errorCode,omitempty"`
 }
 type RunResult struct {
 	Status    string         `json:"status"`

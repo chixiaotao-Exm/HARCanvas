@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentUsesConfiguredCompatibleProviderAndValidatesDependencies(t *testing.T) {
@@ -105,5 +107,54 @@ func TestAgentDoesNotFollowRedirect(t *testing.T) {
 	_, err := NewAnalyzer().Analyze(context.Background(), AgentConfig{BaseURL: provider.URL + "/v1", APIKey: "key", Model: "m"}, []Request{{ID: "req-1"}})
 	if err == nil || targetCalls != 0 {
 		t.Fatal("provider redirect was followed")
+	}
+}
+
+func TestAnalyzerProviderTimeoutDoesNotChangeRunnerLimits(t *testing.T) {
+	for _, timeout := range []time.Duration{0, 180 * time.Second, 250 * time.Millisecond} {
+		analyzer := NewAnalyzerWithTimeout(timeout)
+		expected := timeout
+		if expected <= 0 {
+			expected = 180 * time.Second
+		}
+		transport, ok := analyzer.Client.Transport.(*http.Transport)
+		if !ok || transport.ResponseHeaderTimeout != expected || analyzer.Client.Timeout != expected || analyzer.Timeout != expected {
+			t.Fatal("provider header and total timeouts do not match configured window")
+		}
+	}
+	runner := NewRunner()
+	transport := runner.Client.Transport.(*http.Transport)
+	if runner.Client.Timeout != 25*time.Second || transport.ResponseHeaderTimeout != 20*time.Second {
+		t.Fatal("model timeout change affected replay limits")
+	}
+}
+
+func TestAgentSlowProviderTimeoutIsUsefulAndSanitized(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer provider.Close()
+	analyzer := NewAnalyzerWithTimeout(40 * time.Millisecond)
+	_, err := analyzer.Analyze(context.Background(), AgentConfig{BaseURL: provider.URL + "/secret-endpoint/v1", APIKey: "private-api-key", Model: "m"}, []Request{{ID: "req-1"}})
+	if err == nil || !strings.Contains(err.Error(), "模型服务响应超时") || !strings.Contains(err.Error(), "40ms") {
+		t.Fatalf("timeout was not explained: %v", err)
+	}
+	for _, secret := range []string{provider.URL, "secret-endpoint", "private-api-key"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatal("timeout message leaked provider configuration")
+		}
+	}
+}
+
+func TestAgentCancellationIsExplicit(t *testing.T) {
+	analyzer := NewAnalyzerWithTimeout(time.Second)
+	analyzer.Client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) { return nil, context.Canceled })
+	_, err := analyzer.Analyze(context.Background(), AgentConfig{BaseURL: "https://8.8.8.8/v1", APIKey: "key", Model: "m"}, []Request{{ID: "req-1"}})
+	if err == nil || err.Error() != "模型分析已取消。" {
+		t.Fatalf("cancellation was not explicit: %v", err)
 	}
 }

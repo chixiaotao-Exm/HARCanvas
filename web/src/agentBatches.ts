@@ -1,4 +1,6 @@
 import type { AgentConfig, Analysis, HarRequest } from './types';
+import { boundAnalysisContext, buildAnalysisContext } from './analysisContext.ts';
+import type { AnalysisContext } from './analysisContext.ts';
 
 export const ANALYSIS_BATCH_SIZE = 50;
 export const ANALYSIS_BATCH_BYTES = 96 * 1024;
@@ -51,7 +53,7 @@ export function planAnalysisBatches(requests: HarRequest[]) {
   if (batch.length) batches.push(batch);
   const warnings: string[] = [];
   if (previewCount) warnings.push(`${previewCount} 条请求的正文或响应按前 12000 字节预览分析；原始 HAR 和画布请求保持完整。`);
-  if (batches.length > 1) warnings.push('各批次独立分析，跨批次的请求依赖需要人工核对。');
+  if (batches.length > 1) warnings.push('跨批次共享全局目录、已识别步骤和字段关联；证据不足的依赖仍需人工核对。');
   return { batches, warnings };
 }
 
@@ -59,13 +61,17 @@ type BatchOptions = {
   requests: HarRequest[];
   config: AgentConfig;
   signal: AbortSignal;
-  analyzeBatch: (config: AgentConfig, requests: HarRequest[], signal: AbortSignal) => Promise<Analysis>;
+  goal?: string;
+  analyzeBatch: (config: AgentConfig, requests: HarRequest[], signal: AbortSignal, context?:AnalysisContext) => Promise<Analysis>;
   onProgress?: (progress: AnalysisProgress, analysis: Analysis) => void;
 };
 
 export async function analyzeInBatches(options: BatchOptions) {
   const { batches, warnings } = planAnalysisBatches(options.requests);
   const config = { ...options.config };
+  const globalContext = buildAnalysisContext(options.requests, options.goal);
+  const contextWarning='全局辅助目录、字段关系或历史建议已按大小预算裁剪；本批请求仍单独完整列入分析，原始 HAR 和画布数据保持完整。';
+  if(globalContext.truncated)warnings.push(contextWarning);
   const suggestions = new Map<string, Analysis['suggestions'][number]>();
   const summaries: string[] = [];
   let completedRequests = 0;
@@ -82,7 +88,9 @@ export async function analyzeInBatches(options: BatchOptions) {
     const progress = { batch: i + 1, totalBatches: batches.length, completedRequests, totalRequests: options.requests.length };
     options.onProgress?.(progress, snapshot());
     try {
-      const result = await options.analyzeBatch(config, batches[i], options.signal);
+      const context=boundAnalysisContext({...globalContext,previous:[...suggestions.values()].map(s=>({requestId:s.requestId,label:s.label,dependencies:s.dependencies??[]}))});
+      if(context.truncated&&!warnings.includes(contextWarning))warnings.push(contextWarning);
+      const result = await options.analyzeBatch(config, batches[i], options.signal, context);
       if (options.signal.aborted) { status = 'cancelled'; break; }
       for (const suggestion of result.suggestions) suggestions.set(suggestion.requestId, suggestion);
       summaries.push(`第 ${i + 1}/${batches.length} 批：${result.summary}`);

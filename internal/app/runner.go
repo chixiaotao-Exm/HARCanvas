@@ -8,15 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/net/publicsuffix"
 )
 
 const maxStepResponse = 2 << 20
@@ -37,264 +34,12 @@ func NewRunner() *Runner {
 }
 
 type graph struct {
-	nodes    map[string]FlowNode
-	incoming map[string][]FlowEdge
-	outgoing map[string][]FlowEdge
-	order    []string
-}
-
-func validateFlow(flow Flow) (*graph, error) {
-	if len(flow.Nodes) == 0 || len(flow.Nodes) > 100 {
-		return nil, errors.New("flow requires between 1 and 100 nodes")
-	}
-	if len(flow.Edges) > 300 {
-		return nil, errors.New("flow exceeds 300 edges")
-	}
-	g := &graph{nodes: map[string]FlowNode{}, incoming: map[string][]FlowEdge{}, outgoing: map[string][]FlowEdge{}, order: []string{}}
-	for _, node := range flow.Nodes {
-		if !identifier.MatchString(node.ID) || g.nodes[node.ID].ID != "" {
-			return nil, fmt.Errorf("invalid or duplicate node ID %q", node.ID)
-		}
-		if node.Type != "block" {
-			return nil, fmt.Errorf("node %s has unsupported type %q", node.ID, node.Type)
-		}
-		switch node.Data.Kind {
-		case "input", "extract":
-			if !variableName.MatchString(node.Data.Variable) {
-				return nil, fmt.Errorf("node %s requires a valid variable name", node.ID)
-			}
-		case "request":
-			if strings.TrimSpace(node.Data.URL) == "" {
-				return nil, fmt.Errorf("request %s requires a URL", node.ID)
-			}
-		case "condition":
-			if strings.TrimSpace(node.Data.Variable) == "" {
-				return nil, fmt.Errorf("condition %s requires a variable reference", node.ID)
-			}
-			switch node.Data.Operator {
-			case "eq", "neq", "contains", "exists":
-			default:
-				return nil, fmt.Errorf("condition %s has unsupported operator", node.ID)
-			}
-		case "output":
-		default:
-			return nil, fmt.Errorf("node %s has unsupported kind %q", node.ID, node.Data.Kind)
-		}
-		g.nodes[node.ID] = node
-	}
-	seenEdges := map[string]bool{}
-	for _, edge := range flow.Edges {
-		if g.nodes[edge.Source].ID == "" || g.nodes[edge.Target].ID == "" || edge.Source == edge.Target {
-			return nil, errors.New("edges require two distinct existing nodes")
-		}
-		key := edge.Source + "\x00" + edge.Target + "\x00" + edge.SourceHandle
-		if seenEdges[key] {
-			return nil, errors.New("duplicate connection")
-		}
-		seenEdges[key] = true
-		if g.nodes[edge.Source].Data.Kind == "condition" {
-			if edge.SourceHandle != "true" && edge.SourceHandle != "false" {
-				return nil, errors.New("condition connections require a true or false sourceHandle")
-			}
-		} else if edge.SourceHandle == "true" || edge.SourceHandle == "false" {
-			return nil, errors.New("true/false connections must start at a condition")
-		}
-		g.incoming[edge.Target] = append(g.incoming[edge.Target], edge)
-		g.outgoing[edge.Source] = append(g.outgoing[edge.Source], edge)
-	}
-	degrees := map[string]int{}
-	ready := []string{}
-	for _, node := range flow.Nodes {
-		degrees[node.ID] = len(g.incoming[node.ID])
-		if degrees[node.ID] == 0 {
-			ready = append(ready, node.ID)
-		}
-	}
-	// Use original canvas node order for independent roots, and deterministic
-	// connection order thereafter. A flow's execution does not depend on map order.
-	for len(ready) > 0 {
-		id := ready[0]
-		ready = ready[1:]
-		g.order = append(g.order, id)
-		for _, edge := range g.outgoing[id] {
-			degrees[edge.Target]--
-			if degrees[edge.Target] == 0 {
-				ready = append(ready, edge.Target)
-			}
-		}
-	}
-	if len(g.order) != len(flow.Nodes) {
-		return nil, errors.New("flow contains a cycle; only directed acyclic flows are supported")
-	}
-	for _, node := range flow.Nodes {
-		if node.Data.Kind != "extract" {
-			continue
-		}
-		if g.nodes[node.Data.Source].ID == "" {
-			return nil, fmt.Errorf("extract %s references a missing source node", node.ID)
-		}
-		visited := map[string]bool{}
-		var ancestor func(string) bool
-		ancestor = func(id string) bool {
-			if visited[id] {
-				return false
-			}
-			visited[id] = true
-			for _, edge := range g.incoming[id] {
-				if edge.Source == node.Data.Source || ancestor(edge.Source) {
-					return true
-				}
-			}
-			return false
-		}
-		if !ancestor(node.ID) {
-			return nil, fmt.Errorf("extract %s source must be connected upstream", node.ID)
-		}
-		if strings.TrimSpace(node.Data.Path) == "" {
-			return nil, fmt.Errorf("extract %s requires a JSON path", node.ID)
-		}
-	}
-	for name := range flow.Inputs {
-		if !variableName.MatchString(name) {
-			return nil, fmt.Errorf("invalid input name %q", name)
-		}
-		if len(flow.Inputs[name]) > 2<<20 {
-			return nil, fmt.Errorf("input %s exceeds 2 MiB", name)
-		}
-	}
-	return g, nil
-}
-
-func (r *Runner) Run(ctx context.Context, flow Flow) (RunResult, error) {
-	result := RunResult{Status: "success", Steps: []Step{}, Variables: map[string]any{}}
-	g, err := validateFlow(flow)
-	if err != nil {
-		return result, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-	client := *r.Client
-	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
-	sessionJar := &trackingJar{CookieJar: jar}
-	client.Jar = sessionJar
-	previousRedirect := client.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 8 {
-			return errors.New("too many redirects")
-		}
-		if err := r.Guard.CheckURL(req.Context(), req.URL); err != nil {
-			return err
-		}
-		if previousRedirect != nil {
-			return previousRedirect(req, via)
-		}
-		return nil
-	}
-	results := map[string]any{}
-	active := map[string]bool{}
-	branches := map[string]bool{}
-	for name, value := range flow.Inputs {
-		result.Variables[name] = value
-	}
-	usedResponseBytes := 0
-	failed := false
-	for _, id := range g.order {
-		node := g.nodes[id]
-		step := Step{NodeID: id, Label: node.Data.Label, Kind: node.Data.Kind, Status: "success"}
-		shouldRun := len(g.incoming[id]) == 0
-		for _, edge := range g.incoming[id] {
-			if !active[edge.Source] {
-				continue
-			}
-			if g.nodes[edge.Source].Data.Kind == "condition" && ((edge.SourceHandle == "true") != branches[edge.Source]) {
-				continue
-			}
-			shouldRun = true
-		}
-		if failed || !shouldRun {
-			step.Status = "skipped"
-			if failed {
-				step.Error = "Stopped after a previous step failed"
-			}
-			result.Steps = append(result.Steps, step)
-			continue
-		}
-		start := time.Now()
-		var value any
-		var stepErr error
-		switch node.Data.Kind {
-		case "input":
-			input, exists := flow.Inputs[node.Data.Variable]
-			if !exists {
-				input, stepErr = renderTemplate(node.Data.Value, result.Variables, results)
-			}
-			if stepErr == nil {
-				result.Variables[node.Data.Variable] = input
-				value = input
-			}
-		case "request":
-			var size int
-			value, size, stepErr = r.executeRequest(ctx, &client, node.Data, result.Variables, results)
-			usedResponseBytes += size
-			if stepErr == nil && usedResponseBytes > maxFlowResponses {
-				stepErr = errors.New("flow responses exceed 8 MiB total limit")
-			}
-		case "extract":
-			source, ok := results[node.Data.Source]
-			if !ok {
-				stepErr = fmt.Errorf("source node %s did not run", node.Data.Source)
-			} else {
-				var found bool
-				value, found = lookupPath(source, node.Data.Path)
-				if !found {
-					stepErr = fmt.Errorf("path %q does not exist in %s", node.Data.Path, node.Data.Source)
-				} else {
-					result.Variables[node.Data.Variable] = value
-				}
-			}
-		case "condition":
-			actual, found := resolveReference(node.Data.Variable, result.Variables, results)
-			var expected string
-			expected, stepErr = renderTemplate(node.Data.Expected, result.Variables, results)
-			if stepErr == nil {
-				matched := false
-				if node.Data.Operator == "exists" {
-					matched = found && actual != nil
-				} else if !found {
-					stepErr = fmt.Errorf("unknown variable %q", node.Data.Variable)
-				} else {
-					switch node.Data.Operator {
-					case "eq":
-						matched = stringValue(actual) == expected
-					case "neq":
-						matched = stringValue(actual) != expected
-					case "contains":
-						matched = strings.Contains(stringValue(actual), expected)
-					}
-				}
-				branches[id] = matched
-				value = map[string]any{"matched": matched}
-			}
-		case "output":
-			value, stepErr = renderTemplate(node.Data.Template, result.Variables, results)
-			if stepErr == nil {
-				result.Output = value
-			}
-		}
-		step.DurationMS = time.Since(start).Milliseconds()
-		if stepErr != nil {
-			step.Status = "error"
-			step.Error = stepErr.Error()
-			result.Status = "error"
-			failed = true
-		} else {
-			active[id] = true
-			results[id] = value
-			step.Result = value
-		}
-		result.Steps = append(result.Steps, step)
-	}
-	return result, nil
+	nodes     map[string]FlowNode
+	incoming  map[string][]FlowEdge
+	outgoing  map[string][]FlowEdge
+	order     []string
+	entry     string
+	reachable map[string]bool
 }
 
 func (r *Runner) executeRequest(ctx context.Context, client *http.Client, data BlockData, variables, results map[string]any) (any, int, error) {
@@ -307,7 +52,7 @@ func (r *Runner) executeRequest(ctx context.Context, client *http.Client, data B
 	default:
 		return nil, 0, errors.New("unsupported HTTP method")
 	}
-	address, err := renderTemplate(data.URL, variables, results)
+	address, err := renderRequestURL(data.URL, variables, results)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -318,7 +63,7 @@ func (r *Runner) executeRequest(ctx context.Context, client *http.Client, data B
 	if err := r.Guard.CheckURL(ctx, u); err != nil {
 		return nil, 0, fmt.Errorf("request blocked: %w", err)
 	}
-	body, err := renderTemplate(data.Body, variables, results)
+	body, err := renderRequestBody(data.Body, variables, results)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -401,7 +146,11 @@ func (r *Runner) executeRequest(ctx context.Context, client *http.Client, data B
 		}
 		headers[name] = strings.Join(values, sep)
 	}
-	return map[string]any{"status": response.StatusCode, "headers": headers, "body": decoded}, len(responseBody), nil
+	value := map[string]any{"status": response.StatusCode, "headers": headers, "body": decoded}
+	if !acceptsStatus(data.AcceptStatus, response.StatusCode) {
+		return value, len(responseBody), &executionError{Code: "http_status", Message: fmt.Sprintf("请求返回 HTTP %d，未满足允许的状态码。", response.StatusCode)}
+	}
+	return value, len(responseBody), nil
 }
 
 func renderTemplate(template string, variables, results map[string]any) (string, error) {
