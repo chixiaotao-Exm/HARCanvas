@@ -118,6 +118,8 @@ func (s *harUploadStore) get(id, requestID string) (Request, bool) {
 }
 
 func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	requestID := RequestID(r.Context())
 	if r.Method != "POST" {
 		methodError(w, "POST")
 		return
@@ -135,6 +137,7 @@ func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 415, "请通过文件选择器上传 HAR 文件。")
 		return
 	}
+	logHARStage(requestID, "", "upload_start", "", started, 0, r.ContentLength)
 	var raw []byte
 	for {
 		part, partErr := reader.NextPart()
@@ -142,7 +145,9 @@ func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if partErr != nil {
-			writeError(w, 400, "读取上传文件失败。")
+			failure := harReadFailure(r.Context(), partErr)
+			logHARStage(requestID, "", "next_part_failed", failure.code, started, int64(len(raw)), r.ContentLength)
+			writeHARFailure(w, failure)
 			return
 		}
 		if part.FormName() != "file" || raw != nil {
@@ -153,7 +158,9 @@ func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
 		raw, err = io.ReadAll(io.LimitReader(part, sampleFileLimit+1))
 		part.Close()
 		if err != nil {
-			writeError(w, 400, "读取上传文件失败。")
+			failure := harReadFailure(r.Context(), err)
+			logHARStage(requestID, "", "read_file_failed", failure.code, started, int64(len(raw)), r.ContentLength)
+			writeHARFailure(w, failure)
 			return
 		}
 		if len(raw) > sampleFileLimit {
@@ -165,11 +172,14 @@ func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "请选择非空 HAR 文件。")
 		return
 	}
+	logHARStage(requestID, "", "parse_start", "", started, int64(len(raw)), r.ContentLength)
 	parsed, err := ParseHAR(raw)
 	if err != nil {
+		logHARStage(requestID, "", "parse_failed", "invalid_har", started, int64(len(raw)), r.ContentLength)
 		writeError(w, 400, err.Error())
 		return
 	}
+	logHARStage(requestID, "", "parse_done", "", started, int64(len(raw)), r.ContentLength)
 	if r.Context().Err() != nil {
 		return
 	}
@@ -178,6 +188,27 @@ func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	_, encoded, failure := prepareHARPreview(parsed, id)
+	if failure != nil {
+		writeHARFailure(w, *failure)
+		return
+	}
+	if r.Context().Err() != nil {
+		return
+	}
+	// Commit only imports that can actually be returned to the browser. A
+	// rejected preview must retain neither its HAR nor evict previous imports.
+	if err := s.uploads.put(id, parsed.Requests); err != nil {
+		writeError(w, 413, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(200)
+	_, _ = w.Write(encoded)
+	logHARStage(requestID, "", "completed", "", started, int64(len(raw)), r.ContentLength)
+}
+
+func prepareHARPreview(parsed ParseResult, id string) (ParseResult, []byte, *harFailure) {
 	preview := parsed
 	preview.Requests = make([]Request, len(parsed.Requests))
 	count := 0
@@ -202,25 +233,12 @@ func (s *Server) uploadHAR(w http.ResponseWriter, r *http.Request) {
 	}
 	encoded, err := json.Marshal(preview)
 	if err != nil {
-		writeError(w, 500, "无法编码 HAR 解析结果。")
-		return
+		return ParseResult{}, nil, &harFailure{500, "result_encoding_failed", "无法编码 HAR 解析结果。"}
 	}
 	if len(encoded) > 32<<20 {
-		writeError(w, 413, "请求头与正文超过 32 MiB，请缩小抓包范围；未静默删除请求数据。")
-		return
+		return ParseResult{}, nil, &harFailure{413, "result_too_large", "请求头与正文超过 32 MiB，请缩小抓包范围；未静默删除请求数据。"}
 	}
-	if r.Context().Err() != nil {
-		return
-	}
-	// Commit only imports that can actually be returned to the browser. A
-	// rejected preview must retain neither its HAR nor evict previous imports.
-	if err := s.uploads.put(id, parsed.Requests); err != nil {
-		writeError(w, 413, err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(200)
-	_, _ = w.Write(encoded)
+	return preview, encoded, nil
 }
 func (s *Server) serveUploadedHAR(w http.ResponseWriter, r *http.Request, suffix string) {
 	if r.Method != "GET" {

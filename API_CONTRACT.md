@@ -6,7 +6,7 @@ Provider URL, API key, and model use visible text inputs. Only Save persists pro
 
 ## Common HTTP behavior
 
-- API responses use JSON and `Cache-Control: no-store`. JSON request bodies require `Content-Type: application/json`, contain one JSON value, and have a 32 MiB maximum. File upload uses the separate multipart endpoint below.
+- API responses use JSON and `Cache-Control: no-store`. JSON request bodies require `Content-Type: application/json`, contain one JSON value, and have a 32 MiB maximum. HAR file import uses the chunked endpoints below; the multipart endpoint remains available for compatibility.
 - Ordinary errors are `{error:string}`. Flow preflight failures instead return the structured `FlowValidation` object. Unsupported methods return 405 with `Allow`; missing or expired resources return 404; a full concurrency limit returns 429 without queueing or retrying.
 - When the application is wrapped in `RequestLogging`, responses include a request correlation ID. Server logs contain method, route template, status, timing, job/request IDs and counts; they exclude API keys, HAR/request/response bodies, cookies, URL query values and raw provider errors.
 - Agent and flow task IDs are opaque 24-character identifiers. Task creation returns promptly with 202. Tasks survive the creation request closing; reconnect by polling the same ID, never by automatically repeating POST.
@@ -15,6 +15,32 @@ Provider URL, API key, and model use visible text inputs. Only Save persists pro
 `GET /api/health` → `{status:"ok"}`.
 
 ## HAR import and original evidence
+
+The workbench imports files using short, sequential requests instead of sending an entire large file through one connection. File transfer and parsing are separate stages. No import endpoint calls a model or replays captured requests.
+
+```ts
+type ImportView = {
+  id: string;
+  status: 'uploading' | 'parsing' | 'completed' | 'failed' | 'cancelled';
+  size: number;
+  receivedBytes: number;
+  chunkSize: number;
+  error?: string;
+  errorCode?: string;
+  requestId?: string;
+};
+```
+
+- `POST /api/har/imports` accepts `{size:number}` and returns 201 `ImportView`. File size must be between 1 byte and 256 MiB. At most two imports are active across the chunked and compatibility upload APIs.
+- `PUT /api/har/imports/{id}/chunks?offset=N` sends `application/octet-stream`. Offsets are multiples of `chunkSize` (1 MiB); each chunk must contain exactly that many bytes, except the final chunk which contains the remaining declared bytes. A chunk is committed only after its complete body has been read and validated. Already committed, byte-identical retransmissions are idempotent; changed or out-of-order data returns 409. Success returns the current `ImportView`.
+- `GET /api/har/imports/{id}` returns a small `ImportView` for recovery and polling. `receivedBytes` counts server-confirmed bytes, rather than an estimated completion percentage.
+- `POST /api/har/imports/{id}/complete` requires all declared bytes, starts asynchronous parsing, and promptly returns 202/current `ImportView`. Repeating completion does not create another parser worker. Parsing continues if this HTTP connection closes.
+- `GET /api/har/imports/{id}/result` returns `ParseResult` after completion; an unfinished import returns 409. The result uses the same evidence-preserving preview and full-response retention rules as multipart upload.
+- `DELETE /api/har/imports/{id}` cancels an import and returns its view. Cancelled work cannot later publish success. A parser already running retains its concurrency slot until its worker exits.
+
+Import buffers and results stay in bounded process memory. Transfers expire after 15 minutes without activity; terminal records expire after 30 minutes. At most 32 import records and 64 MiB of encoded results are retained, with older terminal records evicted first. The existing complete-response store has its own limits below. All imports are lost on service restart. A missing/expired import requires reimport. Server stage logs include correlation/import IDs, confirmed or received byte counts, timing, and fixed error classifications, without recording file names or capture contents.
+
+The workbench shows server-confirmed transfer progress, then a distinct indeterminate parsing indicator. Transfer errors remain visible with their diagnostic request ID and a retry action. Cancelling or importing another file invalidates old callbacks so late results cannot replace the current canvas.
 
 `POST /api/har/parse` accepts `{har:<HAR object>}` and returns `ParseResult`. This JSON endpoint retains its 32 MiB request limit and returns full parsed response bodies. It is useful for small HAR objects and compatibility clients.
 

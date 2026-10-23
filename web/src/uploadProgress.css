@@ -34,14 +34,111 @@
   margin: 0 0 0 5px;
 }
 
+.upload-progress.determinate::before {
+  width: var(--import-progress, 0%);
+  transform: none;
+  background-size: 200% 100%;
+  animation: har-upload-colors 2.6s linear infinite;
+  transition: width 180ms ease-out;
+}
+
+.upload-card.busy > span:not(.upload-progress) {
+  white-space: normal;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.import-live-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin: 9px 1px 15px;
+}
+
+.import-live-info > span {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.7;
+}
+
+.import-live-info button {
+  flex-shrink: 0;
+}
+
+.import-feedback {
+  margin: 12px 0;
+  padding: 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--subtle);
+  font-size: 10px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.import-feedback.failed {
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border));
+  background: var(--danger-soft);
+}
+
+.import-feedback.failed > strong {
+  color: var(--danger);
+}
+
+.import-feedback > p {
+  margin: 6px 0 9px;
+  color: var(--text);
+}
+
+.import-feedback > div:last-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.import-feedback .quiet-button {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text);
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
+.import-error-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 8px;
+  padding: 6px 0 11px;
+}
+
+.import-error-details code {
+  font-size: 8px;
+}
+
 @keyframes har-upload-sweep {
   from { transform: translateX(-115%); }
   to { transform: translateX(175%); }
+}
+
+@keyframes har-upload-colors {
+  from { background-position: 0% 50%; }
+  to { background-position: 200% 50%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .upload-progress::before {
     width: 100%;
     animation: none;
+  }
+
+  .upload-progress.determinate::before {
+    width: var(--import-progress, 0%);
+    animation: none;
+    transition: none;
   }
 }

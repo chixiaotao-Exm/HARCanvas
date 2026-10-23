@@ -26,10 +26,12 @@ type Server struct {
 	flowJobs    *flowJobStore
 	uploads     *harUploadStore
 	uploadSlots chan struct{}
+	imports     *harImportStore
 }
 
 func NewServer(webDir string) *Server {
-	return &Server{Runner: NewRunner(), Analyzer: NewAnalyzer(), WebDir: webDir, SampleHAR: filepath.Join("samples", "re.har"), runSlots: make(chan struct{}, 2), agentSlots: make(chan struct{}, 2), jobs: newAgentJobStore(), flowJobs: newFlowJobStore(), uploads: newHARUploadStore(), uploadSlots: make(chan struct{}, 2)}
+	uploadSlots := make(chan struct{}, 2)
+	return &Server{Runner: NewRunner(), Analyzer: NewAnalyzer(), WebDir: webDir, SampleHAR: filepath.Join("samples", "re.har"), runSlots: make(chan struct{}, 2), agentSlots: make(chan struct{}, 2), jobs: newAgentJobStore(), flowJobs: newFlowJobStore(), uploads: newHARUploadStore(), uploadSlots: uploadSlots, imports: newHARImportStore(uploadSlots)}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +65,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, result)
 		case "/api/har/upload":
 			s.uploadHAR(w, r)
+		case "/api/har/imports":
+			s.createHARImport(w, r)
 		case "/api/har/example":
 			if r.Method != "GET" {
 				methodError(w, "GET")
@@ -142,7 +146,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, 200, result)
 		default:
-			if strings.HasPrefix(r.URL.Path, "/api/har/uploads/") {
+			if strings.HasPrefix(r.URL.Path, "/api/har/imports/") {
+				s.serveHARImport(w, r, strings.TrimPrefix(r.URL.Path, "/api/har/imports/"))
+			} else if strings.HasPrefix(r.URL.Path, "/api/har/uploads/") {
 				s.serveUploadedHAR(w, r, strings.TrimPrefix(r.URL.Path, "/api/har/uploads/"))
 			} else if strings.HasPrefix(r.URL.Path, "/api/flow/jobs/") {
 				s.serveFlowJob(w, r, strings.TrimPrefix(r.URL.Path, "/api/flow/jobs/"))

@@ -65,7 +65,7 @@ func requestLogging(next http.Handler, logger *log.Logger) http.Handler {
 // must never enter the request log, including on unknown routes.
 func requestLogRoute(path string) string {
 	switch path {
-	case "/api/health", "/api/har/parse", "/api/har/upload", "/api/har/example", "/api/agent/analyze", "/api/agent/jobs", "/api/flow/run", "/api/flow/validate", "/api/flow/jobs":
+	case "/api/health", "/api/har/parse", "/api/har/upload", "/api/har/imports", "/api/har/example", "/api/agent/analyze", "/api/agent/jobs", "/api/flow/run", "/api/flow/validate", "/api/flow/jobs":
 		return path
 	case "/":
 		return "/"
@@ -78,6 +78,16 @@ func requestLogRoute(path string) string {
 	}
 	if strings.HasPrefix(path, "/api/har/uploads/") {
 		return "/api/har/uploads/:id/requests/:id"
+	}
+	if strings.HasPrefix(path, "/api/har/imports/") {
+		parts := strings.Split(strings.TrimPrefix(path, "/api/har/imports/"), "/")
+		if len(parts) == 2 {
+			switch parts[1] {
+			case "chunks", "complete", "result":
+				return "/api/har/imports/:id/" + parts[1]
+			}
+		}
+		return "/api/har/imports/:id"
 	}
 	if strings.HasPrefix(path, "/api/har/example/requests/") {
 		return "/api/har/example/requests/:id"

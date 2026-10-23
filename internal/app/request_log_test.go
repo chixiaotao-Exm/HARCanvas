@@ -53,3 +53,18 @@ func TestRequestLogMasksUnrecognizedPathsAndReturnsJSONOnPanic(t *testing.T) {
 		t.Fatal("panic or unknown route leaked private text")
 	}
 }
+
+func TestHARImportRequestLogUsesOnlyFixedRouteTemplates(t *testing.T) {
+	for path, want := range map[string]string{
+		"/api/har/imports":                       "/api/har/imports",
+		"/api/har/imports/private-id":            "/api/har/imports/:id",
+		"/api/har/imports/private-id/chunks":     "/api/har/imports/:id/chunks",
+		"/api/har/imports/private-id/complete":   "/api/har/imports/:id/complete",
+		"/api/har/imports/private-id/result":     "/api/har/imports/:id/result",
+		"/api/har/imports/private-id/private-op": "/api/har/imports/:id",
+	} {
+		if route := requestLogRoute(path); route != want || strings.Contains(route, "private-") {
+			t.Fatal("import request log exposed a path segment or lost its route template")
+		}
+	}
+}
