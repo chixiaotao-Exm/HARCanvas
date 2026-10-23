@@ -1,0 +1,10 @@
+web/node_modules/
+web/dist/
+*.exe
+*.log
+.env
+.env.*
+!.env.example
+test-results/
+*.har
+*.tsbuildinfo

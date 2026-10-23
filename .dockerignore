@@ -1,0 +1,12 @@
+.git
+web/node_modules
+web/dist
+test-results
+*.exe
+*.log
+.env
+.env.*
+*.har
+**/*.har
+*.tsbuildinfo
+**/*.tsbuildinfo

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "name": "条件分支示例（不访问网络）",
+  "nodes": [
+    {
+      "id": "input-name",
+      "type": "block",
+      "position": { "x": 0, "y": 120 },
+      "data": { "kind": "input", "label": "输入名字", "variable": "name", "value": "探索者" }
+    },
+    {
+      "id": "check-name",
+      "type": "block",
+      "position": { "x": 340, "y": 120 },
+      "data": { "kind": "condition", "label": "名字是否匹配", "variable": "name", "operator": "eq", "expected": "探索者" }
+    },
+    {
+      "id": "greeting",
+      "type": "block",
+      "position": { "x": 690, "y": 30 },
+      "data": { "kind": "output", "label": "匹配时输出", "template": "你好，{{name}}！条件分支运行成功。" }
+    },
+    {
+      "id": "other-name",
+      "type": "block",
+      "position": { "x": 690, "y": 250 },
+      "data": { "kind": "output", "label": "其他名字", "template": "欢迎，{{name}}。你走到了另一条分支。" }
+    }
+  ],
+  "edges": [
+    { "id": "input-to-check", "source": "input-name", "target": "check-name" },
+    { "id": "true-branch", "source": "check-name", "target": "greeting", "sourceHandle": "true" },
+    { "id": "false-branch", "source": "check-name", "target": "other-name", "sourceHandle": "false" }
+  ],
+  "requests": [],
+  "analysis": null
+}
