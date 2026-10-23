@@ -11,6 +11,7 @@ import (
 )
 
 func TestAgentUsesConfiguredCompatibleProviderAndValidatesDependencies(t *testing.T) {
+	purpose := "根据前一步响应中的 id 查询处理结果，返回当前处理状态供后续条件判断使用；HAR 未提供字段文档，无法确认所有状态值的业务含义。"
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer visible-key" {
 			t.Errorf("wrong provider request: %s %s", r.Method, r.URL.Path)
@@ -25,7 +26,7 @@ func TestAgentUsesConfiguredCompatibleProviderAndValidatesDependencies(t *testin
 		if input.Model != "my-model" || len(input.Messages) != 2 || !strings.Contains(input.Messages[1].Content, "req-2") {
 			t.Error("wrong model or request payload")
 		}
-		content := `{"summary":"两个相关请求","suggestions":[{"requestId":"req-2","label":"读取结果","description":"依赖先前响应中的 id","category":"api","dependencies":["req-1"],"confidence":"high","variables":[{"name":"id","source":"req-1.body.id","description":"结果编号"}]}],"warnings":[]}`
+		content := `{"summary":"两个相关请求","suggestions":[{"requestId":"req-2","label":"查询处理结果","description":"` + purpose + `","category":"api","dependencies":["req-1"],"confidence":"high","variables":[{"name":"id","source":"req-1.body.id","description":"结果编号"}]}],"warnings":[]}`
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
 	}))
 	defer provider.Close()
@@ -33,7 +34,7 @@ func TestAgentUsesConfiguredCompatibleProviderAndValidatesDependencies(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Suggestions) != 1 || result.Suggestions[0].Dependencies[0] != "req-1" || len(result.Warnings) != 1 {
+	if len(result.Suggestions) != 1 || result.Suggestions[0].Dependencies[0] != "req-1" || result.Suggestions[0].Label != "查询处理结果" || result.Suggestions[0].Description != purpose || len(result.Warnings) != 1 {
 		t.Fatalf("wrong analysis: %+v", result)
 	}
 }
@@ -41,10 +42,10 @@ func TestAgentUsesConfiguredCompatibleProviderAndValidatesDependencies(t *testin
 func TestAgentRejectsInvalidUntrustedOutput(t *testing.T) {
 	cases := []string{
 		`not-json`,
-		`{"summary":"x","suggestions":[{"requestId":"invented","label":"x"}]}`,
-		`{"summary":"x","suggestions":[{"requestId":"req-1","label":"x","dependencies":["invented"]}]}`,
-		`{"summary":"x","suggestions":[{"requestId":"req-1","label":"x","dependencies":["req-1"]}]}`,
-		`{"summary":"x","suggestions":[{"requestId":"req-1","label":"x"},{"requestId":"req-1","label":"y"}]}`,
+		`{"summary":"x","suggestions":[{"requestId":"invented","label":"x","description":"查询记录用途"}]}`,
+		`{"summary":"x","suggestions":[{"requestId":"req-1","label":"x","description":"查询记录用途","dependencies":["invented"]}]}`,
+		`{"summary":"x","suggestions":[{"requestId":"req-1","label":"x","description":"查询记录用途","dependencies":["req-1"]}]}`,
+		`{"summary":"x","suggestions":[{"requestId":"req-1","label":"x","description":"查询记录用途"},{"requestId":"req-1","label":"y","description":"查询另一记录用途"}]}`,
 		`{"suggestions":[]}`,
 	}
 	for i, content := range cases {
@@ -56,6 +57,22 @@ func TestAgentRejectsInvalidUntrustedOutput(t *testing.T) {
 			_, err := NewAnalyzer().Analyze(context.Background(), AgentConfig{BaseURL: provider.URL + "/v1", APIKey: "key", Model: "model"}, []Request{{ID: "req-1"}})
 			if err == nil {
 				t.Fatal("untrusted invalid analysis accepted")
+			}
+		})
+	}
+}
+
+func TestAgentRejectsMissingOrBlankPurposeDescription(t *testing.T) {
+	for _, description := range []string{"", `,"description":""`, `,"description":"  \n\t  "`, `,"description":null`} {
+		t.Run(fmt.Sprintf("description_%q", description), func(t *testing.T) {
+			content := `{"summary":"用途分析","suggestions":[{"requestId":"req-1","label":"查询处理状态"` + description + `}]}`
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
+			}))
+			defer provider.Close()
+			result, err := NewAnalyzer().Analyze(context.Background(), AgentConfig{BaseURL: provider.URL + "/v1", APIKey: "key", Model: "model"}, []Request{{ID: "req-1"}})
+			if err == nil || !strings.Contains(err.Error(), "empty description") || len(result.Suggestions) != 0 {
+				t.Fatalf("missing purpose was accepted or replaced by a fallback: suggestions=%d error=%v", len(result.Suggestions), err)
 			}
 		})
 	}
