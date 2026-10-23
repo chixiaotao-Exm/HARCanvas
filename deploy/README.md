@@ -39,6 +39,22 @@ instabox-port publish 8090 --name 'HAR Canvas' --json
 `401`，带正确凭据的 `/api/health` 返回 `{"status":"ok"}`。
 默认 HAR 与全部静态文件、API 一起受登录保护。
 
+如需取消登录，安装显式的实例覆盖配置：
+
+```sh
+sudo install -d -m 0755 /etc/systemd/system/har-canvas.service.d
+sudo install -m 0644 deploy/no-auth.conf /etc/systemd/system/har-canvas.service.d/90-no-auth.conf
+sudo systemctl daemon-reload
+sudo systemctl restart har-canvas
+```
+
+此时任何持有公网链接的人都可以读取默认 HAR 并调用流程接口。
+覆盖配置在服务与机器重启后仍然生效，重新安装基础 service 文件也不会覆盖它。
+恢复登录时删除 `/etc/systemd/system/har-canvas.service.d/90-no-auth.conf`，
+再执行 `daemon-reload` 和 `restart`；原 `shared/service.env` 仍供恢复登录使用。
+公开模式可用不带认证的请求验证首页与 `/api/health` 返回 `200`；
+`verify-deployment.mjs` 专门检查受保护的部署，公开模式不适用。
+
 管理命令：
 
 ```sh
