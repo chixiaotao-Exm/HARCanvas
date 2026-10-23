@@ -21,6 +21,8 @@ type HARImportView struct {
 	Size          int64  `json:"size"`
 	ReceivedBytes int64  `json:"receivedBytes"`
 	ChunkSize     int64  `json:"chunkSize"`
+	Encoding      string `json:"encoding"`
+	OriginalSize  int64  `json:"originalSize"`
 	Error         string `json:"error,omitempty"`
 	ErrorCode     string `json:"errorCode,omitempty"`
 	RequestID     string `json:"requestId,omitempty"`
@@ -162,13 +164,30 @@ func (s *Server) createHARImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Size int64 `json:"size"`
+		Size         int64  `json:"size"`
+		Encoding     string `json:"encoding"`
+		OriginalSize *int64 `json:"originalSize"`
 	}
 	if !decodeBody(w, r, &input) {
 		return
 	}
 	if input.Size <= 0 || input.Size > sampleFileLimit {
 		writeHARFailure(w, harFailure{400, "invalid_size", "请选择非空且不超过 256 MiB 的 HAR 文件。"})
+		return
+	}
+	if input.Encoding == "" {
+		input.Encoding = "identity"
+	}
+	if input.Encoding != "identity" && input.Encoding != "gzip" {
+		writeHARFailure(w, harFailure{400, "invalid_encoding", "上传编码仅支持 identity 或 gzip。"})
+		return
+	}
+	originalSize := input.Size
+	if input.OriginalSize != nil {
+		originalSize = *input.OriginalSize
+	}
+	if originalSize <= 0 || originalSize > sampleFileLimit || input.Encoding == "gzip" && input.OriginalSize == nil || input.Encoding == "identity" && originalSize != input.Size {
+		writeHARFailure(w, harFailure{400, "invalid_original_size", "原始 HAR 大小须为 1 到 256 MiB；gzip 上传必须声明 originalSize，identity 大小须与 size 一致。"})
 		return
 	}
 	id, err := newHARUploadID()
@@ -197,7 +216,7 @@ func (s *Server) createHARImport(w http.ResponseWriter, r *http.Request) {
 		store.removeLocked(oldest)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	view := HARImportView{ID: id, Status: "uploading", Size: input.Size, ChunkSize: harImportChunkSize, RequestID: RequestID(r.Context())}
+	view := HARImportView{ID: id, Status: "uploading", Size: input.Size, ChunkSize: harImportChunkSize, Encoding: input.Encoding, OriginalSize: originalSize, RequestID: RequestID(r.Context())}
 	store.items[id] = &harImport{view: view, ctx: ctx, cancel: cancel, updatedAt: store.now(), slotHeld: true}
 	store.scheduleLocked()
 	store.mu.Unlock()
@@ -423,7 +442,23 @@ func (s *Server) runHARImport(item *harImport, raw []byte) {
 		logHARStage(requestID, id, view.Status, view.ErrorCode, started, view.ReceivedBytes, size)
 		store.workers.Done()
 	}()
-	logHARStage(requestID, id, "parse_start", "", started, int64(len(raw)), size)
+	if item.ctx.Err() != nil {
+		return
+	}
+	if item.view.Encoding == "gzip" {
+		decodeStarted := time.Now()
+		logHARDecode(requestID, id, "decode_start", "none", decodeStarted, size, 0)
+		raw, failure = decodeGzipHAR(item.ctx, raw, item.view.OriginalSize)
+		if failure != nil {
+			logHARDecode(requestID, id, "decode_failed", failure.code, decodeStarted, size, int64(len(raw)))
+			return
+		}
+		logHARDecode(requestID, id, "decode_done", "none", decodeStarted, size, int64(len(raw)))
+	}
+	if item.ctx.Err() != nil {
+		return
+	}
+	logHARStage(requestID, id, "parse_start", "", started, int64(len(raw)), item.view.OriginalSize)
 	parsed, err := store.parse(raw)
 	raw = nil
 	if err != nil {
@@ -433,7 +468,7 @@ func (s *Server) runHARImport(item *harImport, raw []byte) {
 	if item.ctx.Err() != nil {
 		return
 	}
-	logHARStage(requestID, id, "parse_done", "", started, size, size)
+	logHARStage(requestID, id, "parse_done", "", started, item.view.OriginalSize, item.view.OriginalSize)
 	uploadID, err := newHARUploadID()
 	if err != nil {
 		failure = &harFailure{500, "import_create_failed", "无法保存导入记录，请重新导入。"}

@@ -1,18 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {importHar,discardHarImport,HAR_CHUNK_SIZE,HarImportError} from '../src/harImport.ts';
+import {randomBytes} from 'node:crypto';
+import {gunzipSync} from 'node:zlib';
+import {importHar,prepareHarUpload,discardHarImport,HAR_CHUNK_SIZE,HAR_COMPRESS_THRESHOLD,HarImportError} from '../src/harImport.ts';
 import {ApiError} from '../src/runJobs.ts';
 
 const result={requests:[],summary:{total:0,api:0,static:0,domains:[]},warnings:[]};
 const deferred=()=>{let resolve;return {promise:new Promise(r=>{resolve=r;}),resolve:value=>resolve(value)};};
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 const options=(request,extra={})=>({signal:new AbortController().signal,request,sleep:async()=>{},pollMs:0,...extra});
-function server(file,{put,complete,poll,readResult}={}){
+function server(file,{put,complete,poll,readResult,prepared}={}){
  const calls=[],chunks=[];let status='uploading',received=0,created=0,parsed=0,putCount=0,pollCount=0,resultCount=0;
- const view=()=>({id:`import_${created}`,status,size:file.size,receivedBytes:received,chunkSize:HAR_CHUNK_SIZE,requestId:'safe-request-id'});
+ const metadata=prepared?{encoding:prepared.encoding,originalSize:prepared.originalSize}:{};
+ const view=()=>({id:`import_${created}`,status,size:file.size,receivedBytes:received,chunkSize:HAR_CHUNK_SIZE,requestId:'safe-request-id',...metadata});
  const request=async(path,init={})=>{
-  const method=init.method??'GET';calls.push({path,method,signal:init.signal});
-  if(method==='POST'&&path==='/api/har/imports'){assert.deepEqual(JSON.parse(init.body),{size:file.size});created++;received=0;status='uploading';return view();}
+  const method=init.method??'GET';calls.push({path,method,signal:init.signal,headers:init.headers,body:init.body});
+  if(method==='POST'&&path==='/api/har/imports'){assert.deepEqual(JSON.parse(init.body),{size:file.size,...metadata});created++;received=0;status='uploading';return view();}
   assert.ok(path.startsWith(`/api/har/imports/import_${created}`));
   if(method==='DELETE'){status='cancelled';return view();}
   if(method==='PUT'){
@@ -135,4 +138,55 @@ test('invalid protocol identity and already-aborted imports cannot send chunks o
  const file=new Blob(['payload']),calls=[];
  await assert.rejects(importHar(file,options(async(path)=>{calls.push(path);return {id:'wrong/id',status:'uploading',size:file.size,receivedBytes:0,chunkSize:HAR_CHUNK_SIZE};})),error=>error.code==='INVALID_IMPORT_STATE');assert.deepEqual(calls,['/api/har/imports']);
  const controller=new AbortController();controller.abort();await assert.rejects(importHar(file,options(async()=>assert.fail('sent an aborted request'),{signal:controller.signal})),error=>error.code==='CANCELLED');
+});
+
+test('browser gzip round-trips every original HAR byte without decoding or parsing the file',async()=>{
+ const sample=JSON.stringify({log:{entries:[{request:{url:'https://example.test/中文?完整=1',headers:[{name:'Cookie',value:'keep-entire-value'}],postData:{text:'\u0000\r\n原始正文'}},response:{content:{encoding:'base64',text:'AAECA//+'}}}]}}),file=new Blob([sample.repeat(Math.ceil(HAR_COMPRESS_THRESHOLD/sample.length))]),progress=[];
+ file.text=()=>assert.fail('preparation must not decode the entire HAR');
+ const prepared=await prepareHarUpload(file,{signal:new AbortController().signal,onProgress:p=>progress.push(p)});
+ assert.equal(prepared.encoding,'gzip');assert.equal(prepared.originalSize,file.size);assert.ok(prepared.payload.size<file.size);
+ assert.deepEqual(new Uint8Array(gunzipSync(await prepared.payload.arrayBuffer())),new Uint8Array(await file.arrayBuffer()));
+ assert.deepEqual(progress.map(p=>p.phase),['compressing']);assert.equal(progress[0].receivedBytes,0);assert.equal(progress[0].originalSize,file.size);
+});
+
+test('incompressible gzip, unsupported browsers, and small files retain the exact original Blob',async()=>{
+ const file=new Blob([randomBytes(HAR_COMPRESS_THRESHOLD)]),signal=new AbortController().signal;
+ const noGain=await prepareHarUpload(file,{signal});assert.equal(noGain.encoding,'identity');assert.strictEqual(noGain.payload,file);
+ const unsupported=await prepareHarUpload(file,{signal,compressionFactory:null});assert.equal(unsupported.encoding,'identity');assert.strictEqual(unsupported.payload,file);
+ const unavailable=await prepareHarUpload(file,{signal,compressionFactory:()=>{throw new Error('gzip format unavailable');}});assert.strictEqual(unavailable.payload,file);
+ const small=new Blob(['complete small HAR']),untouched=await prepareHarUpload(small,{signal,compressionFactory:()=>assert.fail('small HAR must not start gzip')});assert.strictEqual(untouched.payload,small);
+ const fixture=server(file,{prepared:unsupported});await importHar(unsupported,options(fixture.request));assert.equal(fixture.chunks.reduce((sum,c)=>sum+c.size,0),file.size);
+});
+
+test('cancelling local gzip stops its source reads and never publishes a prepared upload', {timeout:1500},async()=>{
+ const entered=deferred(),gate=deferred(),controller=new AbortController(),progress=[];let reads=0,sourceCancelled=false;
+ const file=new Blob([new Uint8Array(HAR_COMPRESS_THRESHOLD)]);
+ file.stream=()=>new ReadableStream({pull(stream){reads++;if(reads===1){stream.enqueue(new Uint8Array(65536));return;}entered.resolve();return gate.promise;},cancel(){sourceCancelled=true;}});
+ const running=prepareHarUpload(file,{signal:controller.signal,onProgress:p=>progress.push(p)});await entered.promise;controller.abort();
+ await assert.rejects(running,error=>error.code==='CANCELLED');assert.equal(sourceCancelled,true);const stoppedAt=reads;
+ gate.resolve();await tick();assert.equal(reads,stoppedAt);assert.deepEqual(progress.map(p=>p.phase),['compressing']);
+ const alreadyAborted=new AbortController();alreadyAborted.abort();await assert.rejects(prepareHarUpload(file,{signal:alreadyAborted.signal}),error=>error.code==='CANCELLED');assert.equal(reads,stoppedAt);
+ const setupAbort=new AbortController();await assert.rejects(prepareHarUpload(file,{signal:setupAbort.signal,compressionFactory:()=>{setupAbort.abort();return new CompressionStream('gzip');}}),error=>error.code==='CANCELLED');assert.equal(reads,stoppedAt);
+});
+
+test('gzip resume keeps identical prepared payload and metadata across explicit retries',async()=>{
+ const file=new Blob(['全部 HAR 内容\r\n'.repeat(HAR_COMPRESS_THRESHOLD/8)]);let compressionCount=0;
+ const prepared=await prepareHarUpload(file,{signal:new AbortController().signal,compressionFactory:()=>{compressionCount++;return new CompressionStream('gzip');}}),payload=prepared.payload,progress=[];
+ const fixture=server(payload,{prepared,put:({count,commit})=>{if(count===1)throw new ApiError('gateway rejected chunk',400,{errorCode:'bad_chunk',requestId:'gzip-retry'});return commit();}});let failure;
+ await assert.rejects(importHar(prepared,options(fixture.request)),error=>{failure=error;return error.code==='bad_chunk';});
+ await importHar(prepared,options(fixture.request,{resume:failure.view,onProgress:p=>progress.push(p)}));
+ assert.equal(compressionCount,1);assert.strictEqual(prepared.payload,payload);assert.equal(fixture.counts().created,1);assert.equal(fixture.counts().putCount,2);assert.equal(fixture.counts().parsed,1);
+ assert.deepEqual(await fixture.calls.find(c=>c.method==='PUT').body.arrayBuffer(),await fixture.calls.filter(c=>c.method==='PUT').at(-1).body.arrayBuffer());
+ assert.ok(fixture.calls.every(c=>!Object.keys(c.headers??{}).some(name=>name.toLowerCase()==='content-encoding')));
+ assert.ok(progress.every(p=>p.size===payload.size&&p.originalSize===file.size&&p.encoding==='gzip'));
+ assert.equal(progress.at(-1).receivedBytes,payload.size);
+});
+
+test('gzip metadata must be acknowledged before any chunk and must still match on resume',async()=>{
+ const file=new Blob([new Uint8Array(HAR_COMPRESS_THRESHOLD)]),prepared=await prepareHarUpload(file,{signal:new AbortController().signal}),calls=[];
+ const oldServer=async(path,init)=>{calls.push({path,method:init.method});return {id:'old-protocol',status:'uploading',size:prepared.payload.size,receivedBytes:0,chunkSize:HAR_CHUNK_SIZE};};
+ await assert.rejects(importHar(prepared,options(oldServer)),error=>error.code==='INVALID_IMPORT_ENCODING');await tick();
+ assert.deepEqual(calls.map(c=>c.method),['POST','DELETE']);
+ const fixture=server(prepared.payload,{prepared}),wrong={id:'import_1',status:'uploading',size:prepared.payload.size,receivedBytes:0,chunkSize:HAR_CHUNK_SIZE,encoding:'identity',originalSize:file.size};
+ await assert.rejects(importHar(prepared,options(fixture.request,{resume:wrong})),error=>error.code==='INVALID_IMPORT_ENCODING');assert.equal(fixture.calls.length,0);
 });

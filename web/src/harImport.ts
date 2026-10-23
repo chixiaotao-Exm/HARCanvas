@@ -3,11 +3,15 @@ import {apiJSON,ApiError} from './runJobs.ts';
 
 export const HAR_IMPORT_LIMIT=256*1024*1024;
 export const HAR_CHUNK_SIZE=1024*1024;
-export type ImportView={id:string;status:'uploading'|'parsing'|'completed'|'failed'|'cancelled';size:number;receivedBytes:number;chunkSize:number;error?:string;errorCode?:string;requestId?:string};
-export type ImportPhase='creating'|'uploading'|'parsing'|'result'|'completed';
-export type ImportProgress={phase:ImportPhase;view:ImportView|null;size:number;receivedBytes:number;startedAt:number;phaseStartedAt:number;retryCount:number};
+export const HAR_COMPRESS_THRESHOLD=2*1024*1024;
+export type HarEncoding='gzip'|'identity';
+export type PreparedUpload={payload:Blob;encoding:HarEncoding;originalSize:number};
+export type ImportView={id:string;status:'uploading'|'parsing'|'completed'|'failed'|'cancelled';size:number;receivedBytes:number;chunkSize:number;encoding?:HarEncoding;originalSize?:number;error?:string;errorCode?:string;requestId?:string};
+export type ImportPhase='compressing'|'creating'|'uploading'|'parsing'|'result'|'completed';
+export type ImportProgress={phase:ImportPhase;view:ImportView|null;size:number;originalSize:number;encoding:HarEncoding;receivedBytes:number;startedAt:number;phaseStartedAt:number;retryCount:number};
 type Request=(path:string,init?:RequestInit)=>Promise<unknown>;
 type Options={signal:AbortSignal;resume?:ImportView|null;onProgress?:(progress:ImportProgress)=>void;request?:Request;requestTimeoutMs?:number;resultTimeoutMs?:number;parseTimeoutMs?:number;pollMs?:number;maxRetries?:number;now?:()=>number;sleep?:(ms:number,signal:AbortSignal)=>Promise<void>};
+type PreparationOptions={signal:AbortSignal;onProgress?:(progress:ImportProgress)=>void;now?:()=>number;compressionFactory?:(()=>Pick<CompressionStream,'readable'|'writable'>)|null};
 type ErrorDetails={code?:string;status?:number;requestId?:string;view?:ImportView|null};
 export class HarImportError extends Error{
  code:string;status?:number;requestId?:string;view:ImportView|null;
@@ -16,6 +20,40 @@ export class HarImportError extends Error{
 const record=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 function cancelled(){return new HarImportError('导入已取消。',{code:'CANCELLED'});}
 function check(signal:AbortSignal){if(signal.aborted)throw cancelled();}
+function validSize(size:number){if(!Number.isSafeInteger(size)||size<=0||size>HAR_IMPORT_LIMIT)throw new HarImportError(size>HAR_IMPORT_LIMIT?'HAR 文件超过 256 MiB，请缩小抓包范围。':'请选择非空 HAR 文件。',{code:'INVALID_FILE_SIZE'});}
+
+/** Gzip preserves the original bytes. No text decoding, JSON parsing, or field removal. */
+export async function prepareHarUpload(file:Blob,options:PreparationOptions):Promise<PreparedUpload>{
+ const {signal}=options;check(signal);validSize(file.size);
+ const original:PreparedUpload={payload:file,encoding:'identity',originalSize:file.size};
+ const factory=options.compressionFactory===undefined?(typeof CompressionStream==='function'?()=>new CompressionStream('gzip'):null):options.compressionFactory;
+ if(file.size<HAR_COMPRESS_THRESHOLD||!factory)return original;
+ const now=options.now??Date.now,startedAt=now();
+ options.onProgress?.({phase:'compressing',view:null,size:file.size,originalSize:file.size,encoding:'identity',receivedBytes:0,startedAt,phaseStartedAt:startedAt,retryCount:0});
+ check(signal);
+ let compressor:Pick<CompressionStream,'readable'|'writable'>;
+ try{compressor=factory();}catch{check(signal);return original;}
+ check(signal);
+ const source=file.stream(),reader=compressor.readable.getReader(),parts:Uint8Array[]=[],piping=source.pipeTo(compressor.writable,{signal});
+ // Cancelling the reader releases backpressure so pipeTo can stop source reads.
+ const abort=()=>{void reader.cancel(cancelled()).catch(()=>{});};
+ signal.addEventListener('abort',abort,{once:true});
+ const reading=(async()=>{while(true){check(signal);const next=await reader.read();check(signal);if(next.done)break;parts.push(next.value);}})();
+ try{
+  await Promise.all([piping,reading]);check(signal);
+  const payload=new Blob(parts,{type:'application/gzip'});
+  return payload.size<file.size?{payload,encoding:'gzip',originalSize:file.size}:original;
+ }catch(error){
+  if(signal.aborted)throw cancelled();
+  throw new HarImportError(error instanceof Error?`本地压缩失败：${error.message}`:'本地压缩失败，请重试。',{code:'COMPRESSION_FAILED'});
+ }finally{
+  signal.removeEventListener('abort',abort);
+  await reader.cancel().catch(()=>{});
+  await Promise.allSettled([piping,reading]);reader.releaseLock();
+  // Some stream implementations settle a failed pipe before cancelling its source.
+  await source.cancel().catch(()=>{});
+ }
+}
 function normalize(error:unknown,view:ImportView|null):HarImportError{
  if(error instanceof HarImportError){if(!error.view&&error.status!==404&&error.status!==410&&error.code!=='import_expired')error.view=view;return error;}
  const message=error instanceof Error?error.message:'HAR 导入失败，请重试或重新选择文件。';
@@ -24,10 +62,11 @@ function normalize(error:unknown,view:ImportView|null):HarImportError{
  const status=error instanceof ApiError?error.status:undefined,code=typeof data?.errorCode==='string'?data.errorCode:typeof data?.code==='string'?data.code:error instanceof ApiError?'HTTP_ERROR':'NETWORK_ERROR';
  return new HarImportError(message,{view:status===404||status===410||code==='import_expired'?null:view,status,requestId,code});
 }
-function viewOf(value:unknown,size:number,id?:string):ImportView{
+function viewOf(value:unknown,size:number,id?:string,prepared?:PreparedUpload):ImportView{
  if(!record(value)||typeof value.id!=='string'||!/^[-A-Za-z0-9_]{1,128}$/.test(value.id)||(id!==undefined&&value.id!==id)||!['uploading','parsing','completed','failed','cancelled'].includes(String(value.status))||value.size!==size||value.chunkSize!==HAR_CHUNK_SIZE||!Number.isSafeInteger(value.receivedBytes)||(value.receivedBytes as number)<0||(value.receivedBytes as number)>size||['error','errorCode','requestId'].some(k=>value[k]!==undefined&&typeof value[k]!=='string'))throw new HarImportError('服务器返回的导入状态无效，请重新选择文件。',{code:'INVALID_IMPORT_STATE'});
  if(value.status!=='uploading'&&value.status!=='cancelled'&&value.receivedBytes!==size)throw new HarImportError('服务器返回的导入字节数与文件不一致。',{code:'INVALID_IMPORT_STATE'});
  if(value.receivedBytes!==size&&(value.receivedBytes as number)%HAR_CHUNK_SIZE!==0)throw new HarImportError('服务器返回的分片边界无效，请重新导入。',{code:'INVALID_IMPORT_OFFSET'});
+ if(value.encoding!==undefined&&value.encoding!==prepared?.encoding||value.originalSize!==undefined&&value.originalSize!==prepared?.originalSize||prepared?.encoding==='gzip'&&(value.encoding!=='gzip'||value.originalSize!==prepared.originalSize))throw new HarImportError('服务器不支持或未确认本次压缩上传格式，请更新服务后重试。',{code:'INVALID_IMPORT_ENCODING'});
  return value as ImportView;
 }
 function parseResultOf(value:unknown):ParseResult{
@@ -69,22 +108,25 @@ export async function discardHarImport(view:ImportView|null|undefined,keepId?:st
 }
 
 /** One resumable import. This never falls back to uploading the entire file. */
-export async function importHar(file:Blob,options:Options):Promise<ParseResult>{
+export async function importHar(input:Blob|PreparedUpload,options:Options):Promise<ParseResult>{
+ const legacy=input instanceof Blob,prepared:PreparedUpload=legacy?{payload:input,encoding:'identity',originalSize:input.size}:input,file=prepared.payload;
  const {signal}=options,request=options.request??apiJSON,now=options.now??Date.now,wait=options.sleep??sleep;
  const requestMs=options.requestTimeoutMs??45000,resultMs=options.resultTimeoutMs??120000,parseMs=options.parseTimeoutMs??300000,pollMs=options.pollMs??1000,maxRetries=options.maxRetries??2;
  let view:ImportView|null=null,phase:ImportPhase='creating',phaseStartedAt=now(),retryCount=0;const startedAt=phaseStartedAt;
- const emit=(next:ImportPhase)=>{if(signal.aborted)return;if(next!==phase){phase=next;phaseStartedAt=now();}options.onProgress?.({phase,view:view?{...view}:null,size:file.size,receivedBytes:view?.receivedBytes??0,startedAt,phaseStartedAt,retryCount});};
+ const emit=(next:ImportPhase)=>{if(signal.aborted)return;if(next!==phase){phase=next;phaseStartedAt=now();}options.onProgress?.({phase,view:view?{...view}:null,size:file.size,originalSize:prepared.originalSize,encoding:prepared.encoding,receivedBytes:view?.receivedBytes??0,startedAt,phaseStartedAt,retryCount});};
+ const readView=(value:unknown,id?:string)=>viewOf(value,file.size,id,prepared);
  const send=(path:string,init:RequestInit={},timeoutMs=requestMs,onAbandoned?:(value:unknown)=>void)=>requestWithDeadline(request,path,init,signal,timeoutMs,onAbandoned);
- const sync=async()=>{if(!view)throw new HarImportError('导入任务尚未建立。');view=viewOf(await send(`/api/har/imports/${encodeURIComponent(view.id)}`),file.size,view.id);terminal(view);return view;};
+ const sync=async()=>{if(!view)throw new HarImportError('导入任务尚未建立。');view=readView(await send(`/api/har/imports/${encodeURIComponent(view.id)}`),view.id);terminal(view);return view;};
  const cleanup=(id:string)=>{void cancelHarImport(id,request,Math.min(requestMs,5000)).catch(()=>{});};
  try{
   check(signal);
-  if(!Number.isSafeInteger(file.size)||file.size<=0||file.size>HAR_IMPORT_LIMIT)throw new HarImportError(file.size>HAR_IMPORT_LIMIT?'HAR 文件超过 256 MiB，请缩小抓包范围。':'请选择非空 HAR 文件。',{code:'INVALID_FILE_SIZE'});
+  validSize(file.size);validSize(prepared.originalSize);
+  if(!['gzip','identity'].includes(prepared.encoding)||prepared.encoding==='identity'&&file.size!==prepared.originalSize||prepared.encoding==='gzip'&&file.size>=prepared.originalSize)throw new HarImportError('本地上传数据与原始文件不一致，请重新选择文件。',{code:'INVALID_PREPARED_UPLOAD'});
   emit('creating');
-  if(options.resume&&['uploading','parsing','completed'].includes(options.resume.status)){view=viewOf(options.resume,file.size);await sync();}
+  if(options.resume&&['uploading','parsing','completed'].includes(options.resume.status)){view=readView(options.resume);await sync();}
   else{
-   const created=await send('/api/har/imports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({size:file.size})},requestMs,value=>{if(record(value)&&typeof value.id==='string'&&/^[-A-Za-z0-9_]{1,128}$/.test(value.id))cleanup(value.id);});
-   view=viewOf(created,file.size);terminal(view);
+   const created=await send('/api/har/imports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(legacy?{size:file.size}:{size:file.size,encoding:prepared.encoding,originalSize:prepared.originalSize})},requestMs,value=>{if(record(value)&&typeof value.id==='string'&&/^[-A-Za-z0-9_]{1,128}$/.test(value.id))cleanup(value.id);});
+   try{view=readView(created);}catch(error){if(record(created)&&typeof created.id==='string'&&/^[-A-Za-z0-9_]{1,128}$/.test(created.id))cleanup(created.id);throw error;}terminal(view);
   }
   check(signal);
   while(view.status==='uploading'&&view.receivedBytes<file.size){
@@ -94,7 +136,7 @@ export async function importHar(file:Blob,options:Options):Promise<ParseResult>{
     try{
      if(needsSync){await sync();emit(view.status==='uploading'?'uploading':'parsing');if(view.status!=='uploading'||view.receivedBytes===end)break;if(view.receivedBytes!==offset)throw new HarImportError('服务器确认的分片位置与当前文件不一致。',{code:'INVALID_IMPORT_OFFSET',view});}
      const result=await send(`/api/har/imports/${encodeURIComponent(view.id)}/chunks?offset=${offset}`,{method:'PUT',headers:{'Content-Type':'application/octet-stream'},body:file.slice(offset,end)});
-     view=viewOf(result,file.size,view.id);terminal(view);
+     view=readView(result,view.id);terminal(view);
      if(view.status!=='uploading'||view.receivedBytes!==end)throw new HarImportError('服务器未完整确认当前分片，请重新导入。',{code:'INVALID_IMPORT_OFFSET',view});
      retryCount=0;emit('uploading');break;
     }catch(error){const failure=normalize(error,view);if(signal.aborted||!retryable(failure)||errors>=maxRetries)throw failure;errors++;retryCount=errors;needsSync=true;emit('uploading');await wait(Math.min(250*errors,1000),signal);}
@@ -107,7 +149,7 @@ export async function importHar(file:Blob,options:Options):Promise<ParseResult>{
    while(true){
     try{
      if(needsSync){await sync();if(view.status!=='uploading')break;}
-     view=viewOf(await send(`/api/har/imports/${encodeURIComponent(view.id)}/complete`,{method:'POST'}),file.size,view.id);terminal(view);
+     view=readView(await send(`/api/har/imports/${encodeURIComponent(view.id)}/complete`,{method:'POST'}),view.id);terminal(view);
      if(view.status==='uploading')throw new HarImportError('服务器尚未开始解析，请重试当前任务。',{code:'INVALID_IMPORT_STATE',view});
      break;
     }catch(error){const failure=normalize(error,view);if(signal.aborted||!retryable(failure)||errors>=maxRetries)throw failure;errors++;retryCount=errors;needsSync=true;emit('uploading');await wait(250*errors,signal);}
@@ -120,7 +162,7 @@ export async function importHar(file:Blob,options:Options):Promise<ParseResult>{
    await wait(Math.min(pollMs,remaining),signal);
    if(now()-parseStartedAt>=parseMs)throw new HarImportError('解析等待超过上限。可以重试查询同一任务，或取消后重新导入。',{code:'PARSE_TIMEOUT',view,requestId:view.requestId});
    try{
-    view=viewOf(await send(`/api/har/imports/${encodeURIComponent(view.id)}`,{},Math.min(requestMs,Math.max(1,parseMs-(now()-parseStartedAt)))),file.size,view.id);terminal(view);pollErrors=0;retryCount=0;emit('parsing');
+    view=readView(await send(`/api/har/imports/${encodeURIComponent(view.id)}`,{},Math.min(requestMs,Math.max(1,parseMs-(now()-parseStartedAt)))),view.id);terminal(view);pollErrors=0;retryCount=0;emit('parsing');
     if(view.status==='uploading')throw new HarImportError('服务器的解析状态发生回退，请重新导入。',{code:'INVALID_IMPORT_STATE',view});
    }catch(error){const failure=normalize(error,view);if(signal.aborted||!retryable(failure)||pollErrors>=maxRetries)throw failure;pollErrors++;retryCount=pollErrors;emit('parsing');}
   }

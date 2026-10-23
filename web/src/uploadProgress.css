@@ -66,6 +66,14 @@
   flex-shrink: 0;
 }
 
+.import-compression {
+  margin: 9px 1px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
 .import-feedback {
   margin: 12px 0;
   padding: 11px;

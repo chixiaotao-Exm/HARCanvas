@@ -25,22 +25,26 @@ type ImportView = {
   size: number;
   receivedBytes: number;
   chunkSize: number;
+  encoding?: 'identity' | 'gzip';
+  originalSize?: number;
   error?: string;
   errorCode?: string;
   requestId?: string;
 };
 ```
 
-- `POST /api/har/imports` accepts `{size:number}` and returns 201 `ImportView`. File size must be between 1 byte and 256 MiB. At most two imports are active across the chunked and compatibility upload APIs.
+- `POST /api/har/imports` accepts `{size:number,encoding?:'identity'|'gzip',originalSize?:number}` and returns 201 `ImportView`. `size` is the number of bytes to transfer; `originalSize` is the restored HAR size. Both must be between 1 byte and 256 MiB. Missing encoding defaults to `identity`, whose original size defaults to and must equal `size`; gzip requires an explicit original size. Views return the normalized encoding and original size. At most two imports are active across the chunked and compatibility upload APIs.
 - `PUT /api/har/imports/{id}/chunks?offset=N` sends `application/octet-stream`. Offsets are multiples of `chunkSize` (1 MiB); each chunk must contain exactly that many bytes, except the final chunk which contains the remaining declared bytes. A chunk is committed only after its complete body has been read and validated. Already committed, byte-identical retransmissions are idempotent; changed or out-of-order data returns 409. Success returns the current `ImportView`.
 - `GET /api/har/imports/{id}` returns a small `ImportView` for recovery and polling. `receivedBytes` counts server-confirmed bytes, rather than an estimated completion percentage.
 - `POST /api/har/imports/{id}/complete` requires all declared bytes, starts asynchronous parsing, and promptly returns 202/current `ImportView`. Repeating completion does not create another parser worker. Parsing continues if this HTTP connection closes.
 - `GET /api/har/imports/{id}/result` returns `ParseResult` after completion; an unfinished import returns 409. The result uses the same evidence-preserving preview and full-response retention rules as multipart upload.
 - `DELETE /api/har/imports/{id}` cancels an import and returns its view. Cancelled work cannot later publish success. A parser already running retains its concurrency slot until its worker exits.
 
-Import buffers and results stay in bounded process memory. Transfers expire after 15 minutes without activity; terminal records expire after 30 minutes. At most 32 import records and 64 MiB of encoded results are retained, with older terminal records evicted first. The existing complete-response store has its own limits below. All imports are lost on service restart. A missing/expired import requires reimport. Server stage logs include correlation/import IDs, confirmed or received byte counts, timing, and fixed error classifications, without recording file names or capture contents.
+Gzip is lossless transport compression. Chunks remain raw `application/octet-stream` and do not use an HTTP `Content-Encoding` header. After upload, the worker restores the file with a hard read limit, checks the declared restored size, validates the gzip stream, and rejects truncated, corrupt or trailing compressed data before parsing. It never strips captured records or response bodies to reduce transfer size.
 
-The workbench shows server-confirmed transfer progress, then a distinct indeterminate parsing indicator. Transfer errors remain visible with their diagnostic request ID and a retry action. Cancelling or importing another file invalidates old callbacks so late results cannot replace the current canvas.
+Import buffers and results stay in bounded process memory. Transfers expire after 15 minutes without activity; terminal records expire after 30 minutes. At most 32 import records and 64 MiB of encoded results are retained, with older terminal records evicted first. Two workers can temporarily hold both their compressed inputs and restored HAR bytes, each individually capped at 256 MiB, plus parsing allocations. These are content limits rather than a hard process RSS limit. The existing complete-response store has its own limits below. All imports are lost on service restart. A missing/expired import requires reimport. Server stage logs include correlation/import IDs, confirmed or received byte counts, timing, and fixed error classifications, without recording file names or capture contents.
+
+For files at least 2 MiB, the workbench attempts local streaming gzip when the browser supports it, and uses compression only if it reduces size. The compression phase shows elapsed time. Server-confirmed transfer progress uses the actual payload size and displays the original and transferred sizes; retries reuse the same prepared bytes and encoding. Parsing then has a distinct indeterminate indicator. Transfer errors remain visible with their diagnostic request ID and a retry action. Cancelling or importing another file stops compression/transfer and invalidates old callbacks so late results cannot replace the current canvas.
 
 `POST /api/har/parse` accepts `{har:<HAR object>}` and returns `ParseResult`. This JSON endpoint retains its 32 MiB request limit and returns full parsed response bodies. It is useful for small HAR objects and compatibility clients.
 
