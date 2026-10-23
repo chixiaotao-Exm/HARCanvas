@@ -6,6 +6,7 @@ import type { FieldRelation } from './analysisContext.ts';
 export type GenerationMetadata = {
   generatedKey?:string; groupId?:string; groupLabel?:string;
   readiness?:string; evidence?:string[]; uncertainty?:string; inputs?:string[]; outputs?:string[];
+  dependencies?:string[];
 };
 type Enriched = Suggestion & {group?:string;readiness?:string;evidence?:string[];uncertainty?:string;inputs?:string[];outputs?:string[]};
 const stableId=(value:string)=>{let hash=2166136261;for(const char of value)hash=Math.imul(hash^char.charCodeAt(0),16777619);return (hash>>>0).toString(36);};
@@ -46,18 +47,21 @@ function relationBinding(relation:FieldRelation,source:HarRequest|undefined,targ
 }
 
 /** Append only: never change a user's text, position, bindings, or connections. */
-export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:HarRequest[],suggestions:Suggestion[],datasetKey:string,options:{suppressedRequestIds?:Set<string>}={}) {
+export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:HarRequest[],suggestions:Suggestion[],datasetKey:string,options:{suppressedRequestIds?:Set<string>;connectExisting?:boolean}={}) {
   const nextNodes=[...nodes], nextEdges=[...edges];
   const nodeIds=new Set(nodes.map(node=>node.id)),edgeIds=new Set(edges.map(edge=>edge.id));
   const newIds=new Set<string>();
+  const requestById=new Map(requests.map(request=>[request.id,request]));
   const known=new Map<string,string>();
   for(const node of nodes) {
     const metadata=node.data as BlockData&GenerationMetadata;
-    if(node.data.requestId && metadata.generatedKey===`${datasetKey}:${node.data.requestId}`) known.set(node.data.requestId,node.id);
+    if(node.data.kind==='request'&&node.data.requestId&&requestById.has(node.data.requestId)&&metadata.generatedKey===`${datasetKey}:${node.data.requestId}`) known.set(node.data.requestId,node.id);
   }
   const groupByRequest=new Map(planRequestGroups(requests).flatMap(g=>g.requestIds.map(id=>[id,g] as const)));
   const relationList=findFieldRelations(requests);
-  const requestById=new Map(requests.map(request=>[request.id,request]));
+  const blocks=getHarBlocks(requests,suggestions);
+  const suggestionByRequest=new Map(blocks.map(block=>[block.request.id,block.suggestion]));
+  const validDependencies=(dependencies:unknown):string[]=>Array.isArray(dependencies)?[...new Set(dependencies.filter((id):id is string=>typeof id==='string'&&requestById.has(id)))]:[];
   const pending:string[]=[];
   let nextGroupX=nodes.reduce((max,n)=>Math.max(max,n.position.x),-360)+360;
   const groupLayout=new Map<string,{x:number;y:number}>();
@@ -67,7 +71,7 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
     else groupLayout.set(node.data.groupId,{x:node.position.x,y:node.position.y+260});
   }
   let addedCount=0;
-  for(const block of getHarBlocks(requests,suggestions)) {
+  for(const block of blocks) {
     if(known.has(block.request.id)||options.suppressedRequestIds?.has(block.request.id)) continue;
     const suggestion=block.suggestion as Enriched;
     const group=groupByRequest.get(block.request.id);
@@ -90,26 +94,49 @@ export function mergeGeneratedFlow(nodes:FlowNode[],edges:FlowEdge[],requests:Ha
     pending.push(...bindingWarnings.map(warning=>`${suggestion.label}：${warning}`));
     const evidence=[...(suggestion.evidence??[]),...relations.map(r=>r.evidence)];
     const uncertainty=[suggestion.uncertainty||(sensitive?'包含抓包时的会话或动态字段，请通过参数向导检查后再运行。':''),...bindingWarnings].filter(Boolean).join('\n');
-    const data:BlockData&GenerationMetadata={...block.data,generatedKey,groupId,groupLabel:suggestion.group?.trim().slice(0,100)||group?.label,readiness,evidence:evidence.length?evidence:[`原始记录 ${block.request.id} · ${block.request.method} · HTTP ${block.request.status}`],uncertainty,inputs:suggestion.inputs??suggestion.variables.map(v=>`${v.name}：${v.description}`),outputs:suggestion.outputs??[],...(bindings.length?{bindings}:{})};
+    const data:BlockData&GenerationMetadata={...block.data,generatedKey,groupId,groupLabel:suggestion.group?.trim().slice(0,100)||group?.label,readiness,evidence:evidence.length?evidence:[`原始记录 ${block.request.id} · ${block.request.method} · HTTP ${block.request.status}`],uncertainty,inputs:suggestion.inputs??suggestion.variables.map(v=>`${v.name}：${v.description}`),outputs:suggestion.outputs??[],dependencies:validDependencies(suggestion.dependencies),...(bindings.length?{bindings}:{})};
     nextNodes.push({id,type:'block',position:{x:layout.x,y:layout.y},data});
     layout.y+=260;
     known.set(block.request.id,id);newIds.add(id);addedCount++;
   }
-  const pairSet=new Set(nextEdges.map(e=>`${e.source}:${e.target}`));
-  // Recorded field matches establish temporal direction. Model-only guesses
-  // remain pending and cannot silently turn into executable connections.
-  for(const relation of relationList) {
-    const source=known.get(relation.sourceRequestId),target=known.get(relation.targetRequestId);
-    if(!source||!target||source===target||pairSet.has(`${source}:${target}`)||(!newIds.has(source)&&!newIds.has(target)))continue;
+  const pairKey=(source:string,target:string)=>JSON.stringify([source,target]);
+  const pairSet=new Set(nextEdges.map(e=>pairKey(e.source,e.target)));
+  const outgoing=new Map<string,string[]>();
+  for(const edge of nextEdges)outgoing.set(edge.source,[...(outgoing.get(edge.source)??[]),edge.target]);
+  const connect=(sourceRequestId:string,targetRequestId:string,label:string,data:Record<string,unknown>)=>{
+    const source=known.get(sourceRequestId),target=known.get(targetRequestId);
+    if(sourceRequestId===targetRequestId){pending.push(`${targetRequestId}：前序步骤指向自身，请核对 Agent 返回的流程。`);return;}
+    if(!source||!target){pending.push(`${targetRequestId}：前序步骤 ${sourceRequestId} 尚未出现在当前画布，待识别后再连接。`);return;}
+    if(pairSet.has(pairKey(source,target))||(!options.connectExisting&&!newIds.has(source)&&!newIds.has(target)))return;
+    if(nextEdges.length>=5000){pending.push('自动连线已达到 5000 条上限，请缩小流程范围后再补线。');return;}
     // An edited graph may already contain the reverse path. Never add cycles.
     const queue=[target],visited=new Set<string>();let cycle=false;
-    while(queue.length){const id=queue.pop()!;if(id===source){cycle=true;break;}if(visited.has(id))continue;visited.add(id);for(const edge of nextEdges)if(edge.source===id)queue.push(edge.target);}
-    if(cycle){pending.push(`${relation.targetRequestId}：检测到已有反向连接，请手动核对依赖。`);continue;}
-    nextEdges.push({id:reserveId(`auto-${stableId(`${datasetKey}:${source}:${target}`)}`,edgeIds),source,target,type:'smoothstep',label:'字段关联',data:{evidence:relation.evidence,generated:true}});
-    pairSet.add(`${source}:${target}`);
+    while(queue.length){const id=queue.pop()!;if(id===source){cycle=true;break;}if(visited.has(id))continue;visited.add(id);queue.push(...(outgoing.get(id)??[]));}
+    if(cycle){pending.push(`${targetRequestId}：检测到已有反向连接，请手动核对依赖。`);return;}
+    nextEdges.push({id:reserveId(`auto-${stableId(`${datasetKey}:${source}:${target}`)}`,edgeIds),source,target,type:'smoothstep',label,data});
+    outgoing.set(source,[...(outgoing.get(source)??[]),target]);
+    pairSet.add(pairKey(source,target));
+  };
+  // Exact recorded field evidence takes priority over the Agent's execution
+  // order. Both paths share deduplication, collision and cycle checks.
+  for(const relation of relationList) {
+    // Keep irrelevant, unselected HAR records out of the generated-flow hints.
+    if(!known.has(relation.targetRequestId))continue;
+    connect(relation.sourceRequestId,relation.targetRequestId,'字段关联',{evidence:relation.evidence,generated:true});
   }
-  for(const suggestion of suggestions) for(const dependency of suggestion.dependencies??[]) {
-    if(!relationList.some(r=>r.sourceRequestId===dependency&&r.targetRequestId===suggestion.requestId))pending.push(`${suggestion.label}：与 ${dependency} 的关系待确认，尚未自动连线。`);
+  for(const node of nextNodes){
+    const requestId=node.data.requestId;
+    if(!requestId||known.get(requestId)!==node.id)continue;
+    const suggestion=suggestionByRequest.get(requestId);
+    const stored=(node.data as BlockData&GenerationMetadata).dependencies;
+    const dependencies=suggestion?.dependencies??stored??[];
+    if(!Array.isArray(dependencies))continue;
+    for(const dependency of new Set(dependencies)){
+      if(typeof dependency!=='string')continue;
+      if(!requestById.has(dependency)){pending.push(`${node.data.label}：前序请求 ${dependency} 不在当前 HAR 中，请重新分析或核对流程。`);continue;}
+      const confidence=['high','medium','low'].includes(suggestion?.confidence??'')?suggestion!.confidence:'unknown';
+      connect(dependency,requestId,'Agent 流程',{evidence:`Agent 将请求 ${dependency} 识别为 ${requestId} 的前序步骤；参数绑定仍需单独核对。`,kind:'agent-dependency',generated:true,confidence});
+    }
   }
   // Append-only generation cannot retrofit a user's existing bindings. Keep
   // those recorded-source warnings visible on later batches and supplements.

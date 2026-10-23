@@ -6,7 +6,7 @@ export type BlockData = {
   headers?: Record<string, string>; body?: string; variable?: string; value?: string; source?: string;
   path?: string; operator?: string; expected?: string; template?: string;
   acceptStatus?:string; bindings?:ParameterBinding[]; generatedKey?:string; groupId?:string; groupLabel?:string;
-  readiness?:string; evidence?:string[]; uncertainty?:string; inputs?:string[]; outputs?:string[];
+  readiness?:string; evidence?:string[]; uncertainty?:string; inputs?:string[]; outputs?:string[]; dependencies?:string[];
 };
 export type FlowNode = Node<BlockData, 'block'>;
 export type FlowEdge = Edge;

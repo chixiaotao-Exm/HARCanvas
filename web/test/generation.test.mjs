@@ -19,10 +19,101 @@ test('auto generation is grounded, incremental, and connects recorded field matc
  assert.equal(repeated.addedCount,0);assert.equal(repeated.edges.length,0,'manually deleted connections stay deleted');
 });
 
-test('unknown purposes and speculative relationships never become executable edges',()=>{
+test('recognized Agent dependencies connect as execution drafts without inventing requests or bindings',()=>{
  const result=mergeGeneratedFlow([],[],[req('a'),req('b')],[suggestion('a'),suggestion('b',{dependencies:['a']}),suggestion('invented')],'capture');
- assert.equal(result.nodes.length,2);assert.equal(result.edges.length,0);assert.ok(result.pending.length);
+ assert.equal(result.nodes.length,2);assert.equal(result.edges.length,1);
+ assert.equal(result.edges[0].label,'Agent 流程');
+ assert.equal(result.edges[0].data.kind,'agent-dependency');
+ assert.equal(result.edges[0].data.generated,true);assert.equal(result.edges[0].data.confidence,'high');
+ assert.ok(result.edges[0].data.evidence.includes('前序步骤'));
+ assert.deepEqual(result.nodes.map(node=>node.data.bindings??[]),[[],[]]);
  assert.equal(mergeGeneratedFlow([],[],[req('a')],[suggestion('a',{description:' '})],'capture').nodes.length,0);
+});
+
+test('Agent dependencies survive reverse-order batches and preserve existing user data',()=>{
+ const requests=[req('a'),req('b')];
+ const first=mergeGeneratedFlow([],[],requests,[suggestion('b',{dependencies:['a']})],'capture');
+ assert.equal(first.edges.length,0);assert.ok(first.pending.some(message=>message.includes('尚未出现在当前画布')));
+ assert.deepEqual(first.nodes[0].data.dependencies,['a']);
+ first.nodes[0].data.label='用户修改的步骤';first.nodes[0].position={x:171,y:283};
+ first.nodes[0].data.bindings=[{id:'manual-binding',name:'账户',target:'body',path:'account',mode:'user',required:true}];
+ const previousData=first.nodes[0].data;
+ const next=mergeGeneratedFlow(first.nodes,first.edges,requests,[suggestion('a')],'capture');
+ assert.equal(next.addedCount,1);assert.equal(next.edges.length,1);
+ assert.equal(next.nodes[0].data,previousData);assert.deepEqual(next.nodes[0].position,{x:171,y:283});
+ assert.equal(next.edges[0].source,next.nodes.find(node=>node.data.requestId==='a').id);
+ assert.equal(next.edges[0].target,next.nodes[0].id);
+ assert.equal(next.nodes[0].data.bindings[0].id,'manual-binding');
+});
+
+test('Agent execution order keeps true branches and joins instead of chaining HAR chronology',()=>{
+ const requests=['a','b','c','d','unrelated'].map(id=>req(id));
+ const result=mergeGeneratedFlow([],[],requests,[suggestion('a'),suggestion('b',{dependencies:['a']}),suggestion('c',{dependencies:['a']}),suggestion('d',{dependencies:['b','c']}),suggestion('unrelated')],'capture');
+ const requestByNode=new Map(result.nodes.map(node=>[node.id,node.data.requestId]));
+ assert.deepEqual(result.edges.map(edge=>[requestByNode.get(edge.source),requestByNode.get(edge.target)]),[['a','b'],['a','c'],['b','d'],['c','d']]);
+ assert.equal(mergeGeneratedFlow([],[],requests,requests.map(request=>suggestion(request.id)),'capture').edges.length,0);
+});
+
+test('unknown, missing, self and cyclic Agent dependencies remain pending',()=>{
+ const requests=['a','b','missing'].map(id=>req(id));
+ const result=mergeGeneratedFlow([],[],requests,[suggestion('a',{dependencies:['b','a','unknown']}),suggestion('b',{dependencies:['a','missing']})],'capture');
+ assert.equal(result.edges.length,1);
+ assert.ok(result.pending.some(message=>message.includes('指向自身')));
+ assert.ok(result.pending.some(message=>message.includes('不在当前 HAR')));
+ assert.ok(result.pending.some(message=>message.includes('反向连接')));
+ assert.ok(result.pending.some(message=>message.includes('尚未出现在当前画布')));
+ assert.deepEqual(result.nodes[0].data.dependencies,['b','a']);
+});
+
+test('recorded field evidence wins over contradictory Agent order and deduplicates matching evidence',()=>{
+ const requests=[req('a',{responseBody:'{"ticket":"synthetic-shared-ticket"}'}),req('b',{body:'{"ticket":"synthetic-shared-ticket"}'})];
+ const conflict=mergeGeneratedFlow([],[],requests,[suggestion('a',{dependencies:['b']}),suggestion('b',{dependencies:['a','a']})],'capture');
+ assert.equal(conflict.edges.length,1);assert.equal(conflict.edges[0].label,'字段关联');
+ assert.ok(conflict.pending.some(message=>message.includes('反向连接')));
+ assert.deepEqual(conflict.nodes[1].data.dependencies,['a']);
+});
+
+test('deleted Agent lines stay deleted until explicitly restoring existing-node connections',()=>{
+ const requests=[req('a'),req('b')],suggestions=[suggestion('a'),suggestion('b',{dependencies:['a']})];
+ const original=mergeGeneratedFlow([],[],requests,suggestions,'capture');
+ const repeated=mergeGeneratedFlow(original.nodes,[],requests,suggestions,'capture');
+ assert.equal(repeated.edges.length,0);assert.equal(repeated.addedCount,0);
+ const persisted=JSON.parse(JSON.stringify(original.nodes));
+ const restored=mergeGeneratedFlow(persisted,[],requests,[],'capture',{connectExisting:true});
+ assert.equal(restored.edges.length,1);assert.equal(restored.addedCount,0);
+ assert.equal(restored.nodes[0].data,persisted[0].data);assert.equal(restored.nodes[1].data,persisted[1].data);
+ const again=mergeGeneratedFlow(restored.nodes,restored.edges,requests,[],'capture',{connectExisting:true});
+ assert.equal(again.edges.length,1,'explicit restoration also deduplicates repeated requests');
+});
+
+test('saved dependencies are filtered to unique raw request IDs and scoped to their dataset',()=>{
+ const requests=[req('a'),req('b')];
+ const old=mergeGeneratedFlow([],[],requests,[suggestion('a'),suggestion('b',{dependencies:['a','a','invented',null]})],'old');
+ assert.deepEqual(old.nodes[1].data.dependencies,['a']);
+ const current=mergeGeneratedFlow(old.nodes,[],requests,[suggestion('b',{dependencies:['a']})],'new',{connectExisting:true});
+ assert.equal(current.edges.length,0,'a previous capture cannot supply a source or a target');
+ assert.equal(current.addedCount,1);
+ const later=mergeGeneratedFlow(current.nodes,current.edges,requests,[suggestion('a')],'new');
+ assert.equal(later.edges.length,1);
+ const currentA=later.nodes.find(node=>node.data.generatedKey==='new:a');
+ const currentB=later.nodes.find(node=>node.data.generatedKey==='new:b');
+ assert.equal(later.edges[0].source,currentA.id);assert.equal(later.edges[0].target,currentB.id);
+});
+
+test('Agent edge IDs reserve collisions without replacing manual edges',()=>{
+ const requests=[req('a'),req('b')],suggestions=[suggestion('a'),suggestion('b',{dependencies:['a']})];
+ const original=mergeGeneratedFlow([],[],requests,suggestions,'capture');
+ const manual={id:original.edges[0].id,source:'manual-source',target:'manual-target',label:'用户连线'};
+ const generated=mergeGeneratedFlow([], [manual],requests,suggestions,'capture');
+ assert.equal(generated.edges.length,2);assert.deepEqual(generated.edges[0],manual);
+ assert.notEqual(generated.edges[1].id,manual.id);
+});
+
+test('automatic connections respect the graph edge limit and preserve all existing edges',()=>{
+ const existing=Array.from({length:5000},(_,index)=>({id:`manual-${index}`,source:`s${index}`,target:`t${index}`}));
+ const result=mergeGeneratedFlow([],existing,[req('a'),req('b')],[suggestion('a'),suggestion('b',{dependencies:['a']})],'capture');
+ assert.equal(result.edges.length,5000);assert.deepEqual(result.edges,existing);
+ assert.ok(result.pending.some(message=>message.includes('5000 条上限')));
 });
 
 test('an omitted recorded source leaves a consumer pending across batches and later supplemental analysis',()=>{
