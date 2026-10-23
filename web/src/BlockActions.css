@@ -1,0 +1,16 @@
+.node-delete {
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  flex-shrink: 0;
+  color: #a8b2c5;
+  border: 1px solid #465066;
+  background: #141c2b;
+  cursor: pointer;
+}
+.node-delete:hover,
+.node-delete:focus-visible {
+  color: #ffb0bc;
+  border-color: #b45c71;
+  background: #5d29374d;
+}

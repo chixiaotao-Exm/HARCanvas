@@ -8,6 +8,7 @@ import EdgeContextMenu from './EdgeContextMenu';
 import { planGraphDeletion, restoreGraphDeletion, type DeletionKind, type GraphDeletion } from './graph';
 import { analyzeInBatches, type AnalysisProgress } from './agentBatches';
 import './AgentProgress.css';
+import './BlockActions.css';
 
 const kinds: Kind[] = ['input','request','extract','condition','output'];
 const meta = {
@@ -35,11 +36,12 @@ function validAnalysis(value:unknown):value is Analysis {
  if(!record(value)||typeof value.summary!=='string'||!Array.isArray(value.warnings)||!value.warnings.every(v=>typeof v==='string')||!Array.isArray(value.suggestions))return false;
  return value.suggestions.every(s=>record(s)&&['requestId','label','description','category','confidence'].every(k=>typeof s[k]==='string')&&Array.isArray(s.dependencies)&&s.dependencies.every(d=>typeof d==='string')&&Array.isArray(s.variables)&&s.variables.every(v=>record(v)&&['name','source','description'].every(k=>typeof v[k]==='string')));
 }
-function BlockNode({data,selected}:NodeProps<FlowNode>) {
+function BlockNode({id,data,selected}:NodeProps<FlowNode>) {
  const info=meta[data.kind];const Icon=info.icon;
+ const {deleteElements}=useReactFlow<FlowNode,FlowEdge>();
  return <div className={`block-node ${selected?'selected':''}`} style={{'--node-color':info.color} as React.CSSProperties}>
    {data.kind!=='input'&&<Handle type="target" position={Position.Left}/>}
-   <div className="node-top"><span className="node-icon"><Icon size={16}/></span><span>{info.tag}</span><span className="node-grip"><GripVertical size={14}/></span></div>
+   <div className="node-top"><span className="node-icon"><Icon size={16}/></span><span>{info.tag}</span><span className="node-grip"><GripVertical size={14}/></span><button type="button" className="node-delete nodrag nopan" title="删除积木" aria-label={`删除积木：${data.label||info.name}`} onPointerDown={event=>event.stopPropagation()} onClick={event=>{event.stopPropagation();void deleteElements({nodes:[{id}]});}}><Trash2 size={14}/></button></div>
    <div className="node-title">{data.label||info.name}</div>
    <div className="node-detail">{data.kind==='request'?<><b className="node-method">{data.method||'GET'}</b><span>{data.url?data.url.replace(/^https?:\/\//,''):'点击设置请求地址'}</span></>:data.kind==='input'?<><code>{data.variable||'variable'}</code><span className="detail-equals">=</span><span>{data.value||'等待输入'}</span></>:data.kind==='extract'?<code>{data.path||'body.data.id'}</code>:data.kind==='condition'?<code>{data.variable||'variable'} {data.operator||'eq'} {data.expected||'…'}</code>:<span>{data.template||'点击设置输出内容'}</span>}</div>
    {data.kind==='condition'?<><div className="branch-label branch-true">是</div><div className="branch-label branch-false">否</div><Handle id="true" type="source" position={Position.Right} style={{top:'65%'}}/><Handle id="false" type="source" position={Position.Right} style={{top:'86%',background:'#f19cb8'}}/></>:data.kind!=='output'&&<Handle type="source" position={Position.Right}/>}
